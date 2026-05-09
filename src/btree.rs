@@ -23,7 +23,7 @@ use crate::util::*;
 // [4..5] num_entries    u16
 // [6..13] prev_sib    u64
 // [14..21] next_sib   u64
-// slot array: slot_offs[i] u16
+// index: slot_offs[i] u16
 // free space
 // entries.
 //   each entry:
@@ -31,14 +31,19 @@ use crate::util::*;
 //   [2..key_len] key
 //   [key_len..key_len + 8] value
 //
-// The slot array always points to entries in order. The entries themselves
-// do not have to be in order, but they are always contiguous.
+// The index contains offsets to each entry in the node. The index entries
+// are always sorted in lexigraphical order, but the entries themselves
+// do not have to be in sorted. The entries are, however always contiguous.
+// The 'entries_start' field contains the address of the lowest entry.
+// Each entry is a key/value pair, where the key is a variable length
+// field and the value is a 64-bit integer.
 //
 
 const ENTRY_START_FIELD_OFFS: usize = 2;
 const NUM_ENTRIES_FIELD_OFFS: usize = 4;
 const INDEX_OFFS: usize = 22;
 
+// Create an empty node
 fn init_node(node: &mut [u8]) {
     node.fill(0);
     set_u16(node, ENTRY_START_FIELD_OFFS, node.len() as u16);
@@ -259,7 +264,7 @@ mod tests {
     // Ensure sanity check catches out of order entries
     #[test]
     #[should_panic]
-    fn test_sanity_check_ooo() {
+    fn test_sanity_check_out_of_order() {
         let mut node: [u8; 4096] = [0; 4096];
         super::init_node(&mut node);
         // ! out of order
@@ -472,5 +477,13 @@ mod tests {
         super::delete_entry(&mut node, 0);
         sanity_check_node(&node);
         assert_eq!(super::get_num_entries(&node), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_delete_empty() {
+        let mut node: [u8; 4096] = [0; 4096];
+        super::init_node(&mut node);
+        super::delete_entry(&mut node, 0);
     }
 }
