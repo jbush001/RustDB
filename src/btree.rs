@@ -15,6 +15,7 @@
 //
 
 use crate::page_cache;
+use std::cmp::Ordering;
 
 // Btree page format
 // [0..1] type_flags   u16
@@ -73,7 +74,7 @@ fn get_num_records(page: &[u8]) -> usize {
 // Does not check that rec_num is < num_records
 fn get_record_key(page: &[u8], rec_num: usize) -> &[u8] {
     let record_offs = get_record_offs(page, rec_num);
-    let key_len = get_u16(&page, record_offs) as usize;
+    let key_len = get_u16(page, record_offs) as usize;
     let data_start = record_offs + 2;
 
     &page[data_start..data_start + key_len]
@@ -81,24 +82,22 @@ fn get_record_key(page: &[u8], rec_num: usize) -> &[u8] {
 
 fn get_record_value(page: &[u8], rec_num: usize) -> u64 {
     let record_offs = get_record_offs(page, rec_num);
-    let key_len = get_u16(&page, record_offs) as usize;
+    let key_len = get_u16(page, record_offs) as usize;
 
-    get_u64(&page, record_offs + 2 + key_len)
+    get_u64(page, record_offs + 2 + key_len)
 }
 
 // Return the index of the first key *greater* than the search key.
 fn find_key(page: &[u8], key: &[u8]) -> usize {
     let mut low = 0;
-    let mut high = get_num_records(page) as usize;
+    let mut high = get_num_records(page);
     while low < high {
         let mid = (low + high) / 2;
         let mid_key = get_record_key(page, mid);
-        if key < mid_key {
-            high = mid;
-        } else if key > mid_key {
-            low = mid + 1;
-        } else {
-            return mid;
+        match key.cmp(mid_key) {
+            Ordering::Less => high = mid,
+            Ordering::Greater => low = mid + 1,
+            Ordering::Equal => return mid,
         }
     }
 
@@ -106,7 +105,7 @@ fn find_key(page: &[u8], key: &[u8]) -> usize {
 }
 
 fn get_page_free_space(page: &[u8]) -> usize {
-    let index_end = SLOT_ARRAY_OFFS + get_num_records(page) as usize * 2;
+    let index_end = SLOT_ARRAY_OFFS + get_num_records(page) * 2;
     let record_start = get_u16(page, RECORD_START_FIELD_OFFS) as usize;
 
     record_start - index_end
