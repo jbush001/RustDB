@@ -16,6 +16,7 @@
 
 mod btree;
 mod page_cache;
+mod util;
 
 fn main() {
     println!("Hello, world!");
