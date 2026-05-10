@@ -437,4 +437,17 @@ mod tests {
             assert_eq!(m.write_data, WRITE_VAL);
         });
     }
+
+    #[test]
+    #[should_panic]
+    fn test_cache_full() {
+        let mock_io: Rc<RefCell<dyn super::PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
+        let mut page_cache = super::PageCache::new(5, Rc::clone(&mock_io));
+        page_cache.lock_page(super::FilePageId(0), true);
+        page_cache.lock_page(super::FilePageId(1), true);
+        page_cache.lock_page(super::FilePageId(2), true);
+        page_cache.lock_page(super::FilePageId(3), true);
+        page_cache.lock_page(super::FilePageId(4), true);
+        page_cache.lock_page(super::FilePageId(5), true);
+    }
 }
