@@ -25,7 +25,6 @@
 use crate::page_cache::*;
 use std::rc::Rc;
 use std::cell::RefCell;
-use std::any::Any;
 use crate::util::*;
 
 const FREE_LIST_HEAD_OFFS: usize = 4;
@@ -41,8 +40,7 @@ struct PageAllocator {
 impl PageAllocator {
     pub fn new(page_cache: &Rc<RefCell<PageCache>>) -> Self {
         let mut guard = page_cache.borrow_mut();
-        let cpid = guard.lock_page(FilePageId(0), false);
-        let page = guard.get_page_data(cpid);
+        let (cpid, page) = guard.lock_page(FilePageId(0));
         let next_frontier = std::cmp::max(get_u64(page, FILE_SIZE_OFFS), 1);
         let free_list_head = get_u64(page, FREE_LIST_HEAD_OFFS);
         guard.unlock_page(cpid);
@@ -57,32 +55,25 @@ impl PageAllocator {
 
     // Returns a 64 bit page number
     pub fn alloc(&mut self) -> u64 {
-        println!("alloc");
         let mut guard = self.page_cache.borrow_mut();
         if self.free_list_head != FREE_LIST_END {
             let result = self.free_list_head;
-            let cpid = guard.lock_page(FilePageId(self.free_list_head), false);
-            let page = guard.get_page_data(cpid);
+            let (cpid, page) = guard.lock_page(FilePageId(self.free_list_head));
             self.free_list_head = get_u64(page, 0);
             guard.unlock_page(cpid);
 
-            let cpid = guard.lock_page(FilePageId(0), true);
-            let page = guard.get_page_data_mut(cpid,);
+            let (cpid, page) = guard.lock_page_mut(FilePageId(0));
             set_u64(page, FREE_LIST_HEAD_OFFS, self.free_list_head);
             guard.unlock_page(cpid);
-            println!("from free list {}", result);
 
             result
         } else {
             // Carve off frontier
             let result = self.next_frontier;
             self.next_frontier += 1;
-            let cpid = guard.lock_page(FilePageId(0), true);
-            let page = guard.get_page_data_mut(cpid);
+            let (cpid, page) = guard.lock_page_mut(FilePageId(0));
             set_u64(page, FILE_SIZE_OFFS, self.next_frontier);
             guard.unlock_page(cpid);
-
-            println!("from frontier {}", result);
             result
         }
     }
@@ -90,14 +81,12 @@ impl PageAllocator {
     pub fn free(&mut self, fpid: u64) {
         println!("free {}", fpid);
         let mut guard = self.page_cache.borrow_mut();
-        let cpid = guard.lock_page(FilePageId(fpid), true);
-        let page = guard.get_page_data_mut(cpid);
+        let (cpid, page) = guard.lock_page_mut(FilePageId(fpid));
         set_u64(page, 0, self.free_list_head);
         guard.unlock_page(cpid);
         self.free_list_head = fpid;
 
-        let cpid = guard.lock_page(FilePageId(0), true);
-        let page = guard.get_page_data_mut(cpid);
+        let (cpid, page) = guard.lock_page_mut(FilePageId(0));
         set_u64(page, FREE_LIST_HEAD_OFFS, self.free_list_head);
         guard.unlock_page(cpid);
     }
@@ -116,11 +105,11 @@ mod tests {
     }
 
     impl PersistentStore for MockIO {
-        fn read(&mut self, offset: u64, slice: &mut [u8]) {
+        fn read(&mut self, _offset: u64, slice: &mut [u8]) {
             slice.fill(0);
         }
 
-        fn write(&mut self, offset: u64, slice: &[u8]) {
+        fn write(&mut self, _offset: u64, _slice: &[u8]) {
             // This shouldn't be called
         }
 
