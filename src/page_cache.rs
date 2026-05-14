@@ -22,10 +22,10 @@ use std::any::Any;
 const PAGE_SIZE: usize = 4096;
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
-struct FilePageId(u64);
+pub struct FilePageId(pub u64);
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
-struct CachePageId(usize);
+pub struct CachePageId(pub usize);
 
 struct LRUEvictionPolicy {
     next: Vec<Option<CachePageId>>,
@@ -93,7 +93,7 @@ impl LRUEvictionPolicy {
     }
 }
 
-trait PersistentStore: Any {
+pub trait PersistentStore: Any {
     fn read(&mut self, offset: u64, slice: &mut [u8]);
     fn write(&mut self, offset: u64, slice: &[u8]);
     fn as_any(&self) -> &dyn Any;
@@ -107,7 +107,7 @@ struct CachedPage {
     dirty: bool
 }
 
-struct PageCache {
+pub struct PageCache {
     page_map: HashMap<FilePageId, CachePageId>,
     pages: Vec<CachedPage>,
     eviction_policy: LRUEvictionPolicy,
@@ -116,7 +116,7 @@ struct PageCache {
 }
 
 impl PageCache {
-    fn new(size: usize, persistent_store: Rc<RefCell<dyn PersistentStore>>) -> Self {
+    pub fn new(size: usize, persistent_store: Rc<RefCell<dyn PersistentStore>>) -> Self {
         let mut eviction_policy = LRUEvictionPolicy::new(size);
         for i in 0..size {
             eviction_policy.insert(CachePageId(i));
@@ -131,7 +131,7 @@ impl PageCache {
         }
     }
 
-    fn lock_page(&mut self, fpid: FilePageId, writable: bool) -> CachePageId {
+    pub fn lock_page(&mut self, fpid: FilePageId, writable: bool) -> CachePageId {
         let entry = self.page_map.get(&fpid);
         match entry {
             Some(cpid) => {
@@ -178,7 +178,7 @@ impl PageCache {
         }
     }
 
-    fn unlock_page(&mut self, cpid: CachePageId) {
+    pub fn unlock_page(&mut self, cpid: CachePageId) {
         let cp = &mut self.pages[cpid.0];
         cp.ref_count -= 1;
         if cp.dirty {
@@ -196,12 +196,12 @@ impl PageCache {
         }
     }
 
-    fn get_page_data(&self, cpid: CachePageId) -> &[u8] {
+    pub fn get_page_data(&self, cpid: CachePageId) -> &[u8] {
         let offset = cpid.0 * PAGE_SIZE;
         &self.data[offset..offset + PAGE_SIZE]
     }
 
-    fn get_page_data_mut(&mut self, cpid: CachePageId) -> &mut [u8] {
+    pub fn get_page_data_mut(&mut self, cpid: CachePageId) -> &mut [u8] {
         let offset = cpid.0 * PAGE_SIZE;
         &mut self.data[offset..offset + PAGE_SIZE]
     }
