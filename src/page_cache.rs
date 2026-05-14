@@ -128,7 +128,7 @@ impl Drop for PageGuard {
 impl Deref for PageGuard {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        unsafe { &(*self.data).as_slice() }
+        unsafe { (*self.data).as_slice() }
     }
 }
 
@@ -147,7 +147,7 @@ impl Drop for PageGuardMut {
 impl Deref for PageGuardMut {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        unsafe { &(*self.data).as_slice() }
+        unsafe { (*self.data).as_slice() }
     }
 }
 
