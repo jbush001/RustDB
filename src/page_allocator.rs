@@ -39,11 +39,10 @@ struct PageAllocator {
 
 impl PageAllocator {
     pub fn new(page_cache: &Rc<RefCell<PageCache>>) -> Self {
-        let mut guard = page_cache.borrow_mut();
-        let (cpid, page) = guard.lock_page(FilePageId(0));
-        let next_frontier = std::cmp::max(get_u64(page, FILE_SIZE_OFFS), 1);
-        let free_list_head = get_u64(page, FREE_LIST_HEAD_OFFS);
-        guard.unlock_page(cpid);
+        let guard = page_cache.borrow_mut();
+        let page = guard.lock_page(FilePageId(0));
+        let next_frontier = std::cmp::max(get_u64(&page, FILE_SIZE_OFFS), 1);
+        let free_list_head = get_u64(&page, FREE_LIST_HEAD_OFFS);
 
         let page_cache = page_cache.clone();
         PageAllocator {
@@ -55,40 +54,40 @@ impl PageAllocator {
 
     // Returns a 64 bit page number
     pub fn alloc(&mut self) -> u64 {
-        let mut guard = self.page_cache.borrow_mut();
+        let guard = self.page_cache.borrow_mut();
         if self.free_list_head != FREE_LIST_END {
             let result = self.free_list_head;
-            let (cpid, page) = guard.lock_page(FilePageId(self.free_list_head));
-            self.free_list_head = get_u64(page, 0);
-            guard.unlock_page(cpid);
+            {
+                let page = guard.lock_page(FilePageId(self.free_list_head));
+                self.free_list_head = get_u64(&page, 0);
+            }
 
-            let (cpid, page) = guard.lock_page_mut(FilePageId(0));
-            set_u64(page, FREE_LIST_HEAD_OFFS, self.free_list_head);
-            guard.unlock_page(cpid);
+            let mut page = guard.lock_page_mut(FilePageId(0));
+            set_u64(&mut page, FREE_LIST_HEAD_OFFS, self.free_list_head);
 
             result
         } else {
             // Carve off frontier
             let result = self.next_frontier;
             self.next_frontier += 1;
-            let (cpid, page) = guard.lock_page_mut(FilePageId(0));
-            set_u64(page, FILE_SIZE_OFFS, self.next_frontier);
-            guard.unlock_page(cpid);
+            let mut page = guard.lock_page_mut(FilePageId(0));
+            set_u64(&mut page, FILE_SIZE_OFFS, self.next_frontier);
+
             result
         }
     }
 
     pub fn free(&mut self, fpid: u64) {
         println!("free {}", fpid);
-        let mut guard = self.page_cache.borrow_mut();
-        let (cpid, page) = guard.lock_page_mut(FilePageId(fpid));
-        set_u64(page, 0, self.free_list_head);
-        guard.unlock_page(cpid);
-        self.free_list_head = fpid;
+        let guard = self.page_cache.borrow_mut();
+        {
+            let mut page = guard.lock_page_mut(FilePageId(fpid));
+            set_u64(&mut page, 0, self.free_list_head);
+            self.free_list_head = fpid;
+        }
 
-        let (cpid, page) = guard.lock_page_mut(FilePageId(0));
-        set_u64(page, FREE_LIST_HEAD_OFFS, self.free_list_head);
-        guard.unlock_page(cpid);
+        let mut page = guard.lock_page_mut(FilePageId(0));
+        set_u64(&mut page, FREE_LIST_HEAD_OFFS, self.free_list_head);
     }
 }
 
