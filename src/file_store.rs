@@ -117,5 +117,28 @@ mod tests {
         let mut buf: [u8; 10] = [0xff; 10];
         store.read(100, &mut buf);
         assert_eq!(buf, [0u8; 10]);
+
+        // For coverage, read exactly at end
+        let mut buf: [u8; 10] = [0xff; 10];
+        store.read(110, &mut buf);
+        assert_eq!(buf, [0u8; 10]);
+    }
+
+    #[test]
+    fn test_as_any() {
+        let file = NamedTempFile::new().unwrap();
+        let mut store = super::FileStore::open(file.path().to_str().unwrap()).unwrap();
+        let any = store.as_any();
+        assert!(any.downcast_ref::<super::FileStore>().is_some());
+
+        let any = store.as_any_mut();
+        assert!(any.downcast_mut::<super::FileStore>().is_some());
+    }
+
+    #[test]
+    fn test_open_failure() {
+        // A path whose parent directory doesn't exist
+        let result = super::FileStore::open("/nonexistent/dir/test.db");
+        assert!(result.is_err());
     }
 }
