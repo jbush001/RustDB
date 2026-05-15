@@ -109,10 +109,6 @@ struct CachedPage {
     data: Box<[u8; PAGE_SIZE]>
 }
 
-pub struct PageCache {
-    inner: Rc<RefCell<PageCacheInner>>
-}
-
 pub struct PageGuard {
     cpid: CachePageId,
     data: *const [u8; PAGE_SIZE],
@@ -155,6 +151,11 @@ impl DerefMut for PageGuardMut {
     fn deref_mut(&mut self) -> &mut [u8] {
         unsafe { (*self.data).as_mut_slice() }
     }
+}
+
+#[derive(Clone)]
+pub struct PageCache {
+    inner: Rc<RefCell<PageCacheInner>>
 }
 
 impl PageCache {
