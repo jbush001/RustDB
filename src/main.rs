@@ -18,7 +18,18 @@ mod btree;
 mod page_cache;
 mod util;
 mod page_allocator;
+mod file_store;
+
+use std::rc::Rc;
+use std::cell::RefCell;
+use crate::file_store::{FileStore};
+use crate::page_cache::*;
+use crate::page_allocator::*;
 
 fn main() {
-    println!("Hello, world!");
+    let file_store: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(FileStore::open("main.db").unwrap()));
+    let page_cache = PageCache::new(1000, Rc::clone(&file_store));
+    let mut allocator = PageAllocator::new(&page_cache);
+
+    allocator.alloc();
 }

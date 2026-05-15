@@ -29,7 +29,7 @@ const FREE_LIST_HEAD_OFFS: usize = 4;
 const FILE_SIZE_OFFS: usize = 4;
 const FREE_LIST_END: u64 = 0; // Since page 0 is the superblock, can't be freed.
 
-struct PageAllocator {
+pub struct PageAllocator {
     page_cache: PageCache,
     next_frontier: u64,
     free_list_head: u64
