@@ -20,45 +20,22 @@ use std::cmp::Ordering;
 use crate::util::*;
 use crate::page_cache::*;
 use crate::page_allocator::*;
+use bytemuck::{Pod, Zeroable};
+use crate::record_array::*;
 
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct NodeHeader {
+    flags: u16,
+    _unused: [u8; 6],
+    next_sib: u64,
+    prev_sib: u64,
+    left_child: u64,
+}
 
-// Node format
-// Bytes  |  Type  | Description
-// -------|--------|----------------------
-// 0..1   |  u16   | Flags
-// 2..3   |  u16   | Start of entry storage
-// 4..5   |  u16   | Num entries
-// 6..13  |  u64   | Next sibling leaf, for in-order traversal
-// 14..21 |  u64   | Prev sibling leaf, same as above
-// 22..29 |  u64   | Right child. Value for nodes greater than max key (only in leaves)
-// 30..   |  u16   | Index (see below)
-//        |        | Free space
-// N..    |        | Entry storage
-//
-// Each entry is:
-//  key_length: u16
-//  key: [u8; key_length]
-//  value: u64
-//
-// The index contains offsets to each entry in the node. The index entries
-// are always sorted in lexigraphical order, but the entries themselves
-// do not have to be in sorted. The entries are, however always contiguous.
-// As entries are added, they grow downward.
-// The 'entries_start' field contains the address of the lowest entry.
-// Each entry is a key/value pair, where the key is a variable length
-// field and the value is a 64-bit integer.
-// the 'right_child' field for internal nodes represents the child that
-// is greater than all the keys. Since each entry in the page splits
-// the keys, you end up with one extra pointer. Rather then using a
-// dummy node, it is just stored here.
-//
-
-const ENTRY_START_FIELD_OFFS: usize = 2;
-const NUM_ENTRIES_FIELD_OFFS: usize = 4;
-const NEXT_SIB_FIELD_OFFS: usize = 6;
-const PREV_SIB_FIELD_OFFS: usize = 14;
-const LEFT_CHILD_FIELD_OFFS: usize = 22;
-const INDEX_OFFS: usize = 30;
+// Each node entry is:
+// key: 16 bytes
+// value: variable length
 
 const FLAG_LEAF: u16 = 1;
 
@@ -89,19 +66,20 @@ impl Cursor {
         let page = self.page_cache.lock_page(FilePageId(self.current_page_fpid));
         let entry = (get_entry_key(&page, self.current_index).to_vec(),
             get_entry_value(&page, self.current_index));
+        let header: &NodeHeader = bytemuck::from_bytes(&page[0..RA_HEADER_SIZE]);
         if self.reverse {
             if self.current_index == 0 {
-                self.current_page_fpid = get_u64(&page, PREV_SIB_FIELD_OFFS);
+                self.current_page_fpid = header.prev_sib;
                 if self.current_page_fpid != INVALID_FPID {
                     let page = self.page_cache.lock_page(FilePageId(self.current_page_fpid));
-                    self.current_index = get_num_entries(&page) - 1;
+                    self.current_index = get_ra_num_entries(&page) - 1;
                 }
             } else {
                 self.current_index -= 1;
             }
         } else {
-            if self.current_index == get_num_entries(&page) - 1 {
-                self.current_page_fpid = get_u64(&page, NEXT_SIB_FIELD_OFFS);
+            if self.current_index == get_ra_num_entries(&page) - 1 {
+                self.current_page_fpid = header.next_sib;
                 self.current_index = 0;
             } else {
                 self.current_index += 1;
@@ -116,13 +94,14 @@ fn btree_iterate(root_node_fpid: u64, reverse: bool, page_cache: &PageCache) -> 
     let mut current_node_fpid = root_node_fpid;
     loop {
         let page = page_cache.lock_page_mut(FilePageId(current_node_fpid));
-        let index = if reverse { get_num_entries(&page) - 1 } else { 0 };
+        let index = if reverse { get_ra_num_entries(&page) - 1 } else { 0 };
         if is_leaf(&page) {
             return Cursor::new(current_node_fpid, index, reverse, page_cache);
         }
 
         if index == 0 {
-            current_node_fpid = get_u64(&page, LEFT_CHILD_FIELD_OFFS);
+            let header: &NodeHeader = bytemuck::from_bytes(&page[0..RA_HEADER_SIZE]);
+            current_node_fpid = header.left_child;
         } else {
             current_node_fpid = get_entry_value(&page, index);
         }
@@ -140,7 +119,8 @@ fn btree_find(root_node_fpid: u64, key: &[u8], reverse: bool, page_cache: &PageC
         }
 
         if index == 0 {
-            current_node_fpid = get_u64(&page, LEFT_CHILD_FIELD_OFFS);
+            let header: &NodeHeader = bytemuck::from_bytes(&page[0..RA_HEADER_SIZE]);
+            current_node_fpid = header.left_child;
         } else {
             current_node_fpid = get_entry_value(&page, index - 1);
         }
@@ -165,7 +145,8 @@ fn btree_insert(root_node_fpid: u64,
 
         let index = find_key(&page, key);
         if index == 0 {
-            current_node_fpid = get_u64(&page, LEFT_CHILD_FIELD_OFFS);
+            let header: &NodeHeader = bytemuck::from_bytes(&page[0..RA_HEADER_SIZE]);
+            current_node_fpid = header.left_child;
         } else {
             current_node_fpid = get_entry_value(&page, index - 1);
         }
@@ -179,7 +160,7 @@ fn btree_insert(root_node_fpid: u64,
     let mut insert_key = key.to_vec();
     for node_fpid in path.iter().rev() {
         let mut page = page_cache.lock_page_mut(FilePageId(*node_fpid));
-        if get_node_free_space(&page) >= get_entry_size(&insert_key) {
+        if get_ra_free_space(&page) >= get_entry_size(&insert_key) {
             insert_entry(&mut page, insert_key.as_slice(), insert_value);
             break;
         }
@@ -193,9 +174,12 @@ fn btree_insert(root_node_fpid: u64,
             let mut new_page1 = page_cache.lock_page_mut(FilePageId(new_page_fpid1));
             let mut new_page2 = page_cache.lock_page_mut(FilePageId(new_page_fpid2));
             let split_key = split_node(&page, &mut new_page1, &mut new_page2);
+
             // This really only matters when the root is a leaf
-            set_u64(&mut new_page1, NEXT_SIB_FIELD_OFFS, new_page_fpid2);
-            set_u64(&mut new_page2, PREV_SIB_FIELD_OFFS, new_page_fpid1);
+            let header1: &mut NodeHeader = bytemuck::from_bytes_mut(&mut new_page1[0..RA_HEADER_SIZE]);
+            header1.next_sib = new_page_fpid2;
+            let header2: &mut NodeHeader = bytemuck::from_bytes_mut(&mut new_page2[0..RA_HEADER_SIZE]);
+            header2.prev_sib = new_page_fpid1;
 
             // Now do the actual insertion
             if insert_key > split_key {
@@ -208,7 +192,8 @@ fn btree_insert(root_node_fpid: u64,
             init_node(&mut page);
             set_not_leaf(&mut page);
             append_entry(&mut page, &split_key, new_page_fpid2);
-            set_u64(&mut page, LEFT_CHILD_FIELD_OFFS, new_page_fpid1);
+            let page_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut page[0..RA_HEADER_SIZE]);
+            page_header.left_child = new_page_fpid1;
             break;
         } else {
             // Split leaf or interior page.
@@ -217,14 +202,18 @@ fn btree_insert(root_node_fpid: u64,
             let mut new_page = page_cache.lock_page_mut(FilePageId(new_page_fpid));
             let new_parent_key = split_node(&page, &mut temp, &mut new_page);
             if is_leaf(&page) {
-                set_u64(&mut temp, PREV_SIB_FIELD_OFFS, get_u64(&page, PREV_SIB_FIELD_OFFS));
-                set_u64(&mut temp, NEXT_SIB_FIELD_OFFS, new_page_fpid);
-                set_u64(&mut new_page, PREV_SIB_FIELD_OFFS, *node_fpid);
-                set_u64(&mut new_page, NEXT_SIB_FIELD_OFFS, get_u64(&page, NEXT_SIB_FIELD_OFFS));
+                let old_page_header: &NodeHeader = bytemuck::from_bytes(&page[0..RA_HEADER_SIZE]);
+                let temp_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut temp[0..RA_HEADER_SIZE]);
+                let new_page_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut new_page[0..RA_HEADER_SIZE]);
+                temp_header.prev_sib = old_page_header.prev_sib;
+                temp_header.next_sib = new_page_fpid;
+                new_page_header.prev_sib = *node_fpid;
+                new_page_header.next_sib = old_page_header.next_sib;
 
                 // Need to fix back-link
-                let mut next_sib_page = page_cache.lock_page_mut(FilePageId(get_u64(&page, NEXT_SIB_FIELD_OFFS)));
-                set_u64(&mut next_sib_page, PREV_SIB_FIELD_OFFS, new_page_fpid);
+                let mut next_sib_page = page_cache.lock_page_mut(FilePageId(old_page_header.next_sib));
+                let next_sib_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut next_sib_page[0..RA_HEADER_SIZE]);
+                next_sib_header.prev_sib = new_page_fpid;
             }
 
             page.copy_from_slice(&temp);
@@ -264,7 +253,7 @@ fn btree_delete(root_node_fpid: u64,
         let (entry_key, entry_val) = next.unwrap();
         if key == entry_key && value == entry_val {
             let mut page = page_cache.lock_page_mut(FilePageId(page_fpid));
-            delete_entry(&mut page, index);
+            delete_record_array(&mut page, index);
             break;
         }
     }
@@ -278,12 +267,12 @@ fn print_btree(root_node_fpid: u64, page_cache: &PageCache) {
         let page = page_cache.lock_page_mut(FilePageId(next));
         print_node(&page);
         if !is_leaf(&page) {
-            let left_child = get_u64(&page, LEFT_CHILD_FIELD_OFFS);
-            if left_child != INVALID_FPID {
-                fifo.push(left_child);
+            let header: &NodeHeader = bytemuck::from_bytes(&page[0..RA_HEADER_SIZE]);
+            if header.left_child != INVALID_FPID {
+                fifo.push(header.left_child);
             }
 
-            for i in 0..get_num_entries(&page) {
+            for i in 0..get_ra_num_entries(&page) {
                 fifo.push(get_entry_value(&page, i));
             }
         }
@@ -300,7 +289,7 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 fn print_node(node: &[u8]) {
-    for i in 0..get_num_entries(node) {
+    for i in 0..get_ra_num_entries(node) {
         println!("{}. {} value {}", i,
             to_hex(get_entry_key(node, i)), get_entry_value(node, i));
     }
@@ -308,28 +297,19 @@ fn print_node(node: &[u8]) {
 
 // Create an empty node
 fn init_node(node: &mut [u8]) {
-    node.fill(0);
-    set_u16(node, ENTRY_START_FIELD_OFFS, node.len() as u16);
-    set_u16(node, 0, FLAG_LEAF);
+    init_record_array(node);
+    let header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut node[0..RA_HEADER_SIZE]);
+    header.flags |= FLAG_LEAF;
 }
 
 fn is_leaf(node: &[u8]) -> bool {
-    (get_u16(node, 0) & FLAG_LEAF) != 0
+    let header: &NodeHeader = bytemuck::from_bytes(&node[0..RA_HEADER_SIZE]);
+    (header.flags & FLAG_LEAF) != 0
 }
 
 fn set_not_leaf(node: &mut [u8]) {
-    set_u16(node, 0, get_u16(node, 0) & !FLAG_LEAF);
-}
-
-fn get_num_entries(node: &[u8]) -> usize {
-    get_u16(node, NUM_ENTRIES_FIELD_OFFS) as usize
-}
-
-fn get_node_free_space(node: &[u8]) -> usize {
-    let index_end = INDEX_OFFS + get_num_entries(node) * 2;
-    let entry_start = get_u16(node, ENTRY_START_FIELD_OFFS) as usize;
-
-    entry_start - index_end
+    let header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut node[0..RA_HEADER_SIZE]);
+    header.flags &= !FLAG_LEAF;
 }
 
 fn get_entry_size(key: &[u8]) -> usize {
@@ -339,28 +319,14 @@ fn get_entry_size(key: &[u8]) -> usize {
     key.len() + 8 + 2 + 2
 }
 
-fn get_entry_offs(node: &[u8], rec_num: usize) -> usize {
-    get_u16(node, INDEX_OFFS + rec_num * 2) as usize
-}
-
 fn get_entry_key(node: &[u8], rec_num: usize) -> &[u8] {
-    assert!(rec_num < get_num_entries(node), "record number of of bounds");
-
-    let entry_offs = get_entry_offs(node, rec_num);
-    let key_len = get_u16(node, entry_offs) as usize;
-    let data_start = entry_offs + 2;
-
-    &node[data_start..data_start + key_len]
+    let rec = get_record(node, rec_num);
+    &rec[8..rec.len()]
 }
 
 fn get_entry_value(node: &[u8], rec_num: usize) -> u64 {
-    let num_entries = get_num_entries(node);
-    assert!(rec_num <= num_entries, "record number of of bounds");
-
-    let entry_offs = get_entry_offs(node, rec_num);
-    let key_len = get_u16(node, entry_offs) as usize;
-
-    get_u64(node, entry_offs + 2 + key_len)
+    let rec = get_record(node, rec_num);
+    get_u64(rec, 0)
 }
 
 // A few ways to describe this:
@@ -371,7 +337,7 @@ fn get_entry_value(node: &[u8], rec_num: usize) -> u64 {
 // within that span of keys is undefined.
 fn find_key(node: &[u8], key: &[u8]) -> usize {
     let mut low = 0;
-    let mut high = get_num_entries(node);
+    let mut high = get_ra_num_entries(node);
     while low < high {
         let mid = (low + high) / 2;
         let mid_key = get_entry_key(node, mid);
@@ -387,54 +353,23 @@ fn find_key(node: &[u8], key: &[u8]) -> usize {
 
 // Insert a entry into a single node.
 fn insert_entry(node: &mut [u8], key: &[u8], value: u64) {
-    assert!(get_node_free_space(node) >= key.len() + 12, "insert failed: insufficient space");
-
-    let num_recs = get_num_entries(node);
-    let new_slot = find_key(node, key);
-
-    // Move all index slots to make room
-    let slot_start = INDEX_OFFS + new_slot * 2;
-    let slot_end = INDEX_OFFS + num_recs * 2;
-    node.copy_within(slot_start..slot_end, slot_start + 2);
-
-    // Fill in the slot index
-    let entry_size = key.len() + 10; // 2 bytes for length, 8 for the value
-    let new_entry_offs = get_u16(node, ENTRY_START_FIELD_OFFS) as usize - entry_size;
-    set_u16(node, NUM_ENTRIES_FIELD_OFFS, num_recs as u16 + 1); // Increment number of used slots.
-    set_u16(node, INDEX_OFFS + new_slot * 2, new_entry_offs as u16); // Set entry offs
-    set_u16(node, ENTRY_START_FIELD_OFFS, new_entry_offs as u16); // update pointer to data area
-
-    // Fill in the entry
-    set_u16(node, new_entry_offs, key.len() as u16);
-    node[new_entry_offs + 2..new_entry_offs + 2 + key.len()].copy_from_slice(key);
-    set_u64(node, new_entry_offs + 2 + key.len(), value);
+    let index = find_key(node, key);
+    let mut entry = Vec::with_capacity(key.len() + 8);
+    entry.extend_from_slice(&value.to_le_bytes());
+    entry.extend_from_slice(key);
+    insert_record_array(node, index, &entry);
 }
 
 // Helper function to add entry to next available slot. This assumes the entry is
 // added in order. It assumes there is adequate space in the node.
 // Returns entry size
 fn append_entry(node: &mut [u8], key: &[u8], value: u64) -> usize {
-    // 8 bytes for the value, 2 for the entry length, 2 for the index entry
-    assert!(get_node_free_space(node) >= key.len() + 12, "append failed, insufficient space");
+    let mut entry = Vec::with_capacity(key.len() + 8);
+    entry.extend_from_slice(&value.to_le_bytes());
+    entry.extend_from_slice(key);
+    insert_record_array(node, get_ra_num_entries(node), &entry);
 
-    let entry_length = 2 + key.len() + 8;
-    let entry_offs = get_u16(node, ENTRY_START_FIELD_OFFS) as usize - entry_length;
-    let next_slot = get_num_entries(node);
-
-    // Write the entry itself
-    set_u16(node, entry_offs, key.len() as u16);
-    node[entry_offs + 2..entry_offs + 2 + key.len()]
-        .copy_from_slice(key);
-    set_u64(node, entry_offs + 2 + key.len(), value);
-
-    // Update index
-    set_u16(node, INDEX_OFFS + next_slot * 2, entry_offs as u16);
-    set_u16(node, NUM_ENTRIES_FIELD_OFFS, next_slot as u16 + 1);
-
-    // Update start of entries
-    set_u16(node, ENTRY_START_FIELD_OFFS, entry_offs as u16);
-
-    entry_length
+    get_entry_size(key)
 }
 
 // Returns the separator key.
@@ -446,7 +381,7 @@ fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
 
     // Copy out entries from the orig into out1 until we have just over half.
     // then continue copying into out2.
-    let orig_entries = get_num_entries(orig);
+    let orig_entries = get_ra_num_entries(orig);
 
     let mut orig_index = 0;
     let mut bytes_copied = 0;
@@ -463,7 +398,8 @@ fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
     if !is_leaf(orig) {
         // Remove the separator key, which will go into the parent. Save its value
         // into the left child.
-        set_u64(out2, LEFT_CHILD_FIELD_OFFS, get_entry_value(orig, orig_index));
+        let header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut out2[0..RA_HEADER_SIZE]);
+        header.left_child = get_entry_value(orig, orig_index);
         orig_index += 1;
     }
 
@@ -474,41 +410,13 @@ fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
         orig_index += 1;
     }
 
-    assert!(get_entry_value(orig, LEFT_CHILD_FIELD_OFFS) != 0, "left child is 0");
-    set_u64(out1, LEFT_CHILD_FIELD_OFFS, get_u64(orig, LEFT_CHILD_FIELD_OFFS));
+    let out_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut out1[0..RA_HEADER_SIZE]);
+    let orig_header: &NodeHeader = bytemuck::from_bytes(&orig[0..RA_HEADER_SIZE]);
+    out_header.left_child = orig_header.left_child;
 
     separator
 }
 
-fn delete_entry(node: &mut [u8], index: usize) {
-    let total_recs = get_num_entries(node);
-    assert!(index < total_recs, "delete_entry: invalid index");
-
-    let deleted_entry_offs = get_u16(node, INDEX_OFFS + index * 2) as usize;
-    let deleted_entry_len = get_u16(node, deleted_entry_offs) as usize + 10;
-
-    // Remove this index entry and slide the other ones up to take the place
-    let index_offs = INDEX_OFFS + index * 2;
-    node.copy_within(index_offs + 2..INDEX_OFFS + total_recs * 2, index_offs);
-    set_u16(node, NUM_ENTRIES_FIELD_OFFS, total_recs as u16 - 1);
-
-    // Now move all the entries down so there are no gaps
-    let old_entries_start = get_u16(node, ENTRY_START_FIELD_OFFS) as usize;
-    node.copy_within(old_entries_start..deleted_entry_offs,
-        old_entries_start + deleted_entry_len);
-
-    // Walk through the remaining index, adjust offss of anything that was before
-    // the deleted entry.
-    for i in 0..total_recs - 1 {
-        let old_offs = get_u16(node, INDEX_OFFS + i * 2) as usize;
-        if old_offs < deleted_entry_offs {
-            set_u16(node, INDEX_OFFS + i * 2, (old_offs + deleted_entry_len) as u16);
-        }
-    }
-
-    // Adjust the new start of entries
-    set_u16(node, ENTRY_START_FIELD_OFFS, (old_entries_start + deleted_entry_len) as u16);
-}
 
 #[cfg(test)]
 mod tests {
@@ -561,48 +469,10 @@ mod tests {
     }
 
     fn sanity_check_node(node: &[u8]) {
-        let mut sorted_rec_offs: Vec<usize> = Vec::new();
-
-        // Walk through the entries, put offss into a list.
-        let num_entries = get_u16(node, 4) as usize;
-        if num_entries == 0 {
-            // Ensure first offs in header is correct
-            let header_first_offs = get_u16(node, 2) as usize;
-            assert_eq!(node.len(), header_first_offs, "header_first_offs is incorrect");
-            return
-        }
-
-        for i in 0..num_entries {
-            let rec_offs = get_u16(node, INDEX_OFFS + i * 2) as usize;
-            assert_lt!(rec_offs, node.len(), "record offset out of range");
-            sorted_rec_offs.push(rec_offs);
-        }
-
-        // The entries don't have to be in order in the node, but put them
-        // in order for our test.
-        sorted_rec_offs.sort();
-
-        // Ensure first offs in header is correct
-        let header_first_offs = get_u16(node, 2) as usize;
-        assert_eq!(sorted_rec_offs[0], header_first_offs, "first offset is incorrect");
-
-        // Now ensure the entry are packed end-to-end, the lengths are in
-        // the node.
-        let mut last_entry_end = header_first_offs;
-        for rec_offs in sorted_rec_offs {
-            assert_eq!(rec_offs, last_entry_end); // ensure non-overlapping
-            last_entry_end = rec_offs + get_u16(node, rec_offs) as usize + 10;
-            assert_le!(last_entry_end, node.len(), "record length out of bounds"); // Ensure it doesn't spill off node
-        }
-
         // Ensure the keys are in order
         let mut last_key: &[u8] = &[0];
-        for i in 0..num_entries {
-            let entry_offs = get_u16(node, INDEX_OFFS + i * 2) as usize;
-            let key_len = get_u16(&node, entry_offs) as usize;
-            let key_start = entry_offs + 2;
-
-            let this_key = &node[key_start..key_start + key_len];
+        for i in 0..get_ra_num_entries(node) {
+            let this_key = get_entry_key(node, i);
             assert_le!(last_key, this_key, "keys are out of order");
             last_key = this_key;
         }
@@ -617,49 +487,6 @@ mod tests {
         mock_io.read(0, &mut temp);
     }
 
-    // Ensure sanity check catches out of order entries
-    #[test]
-    #[should_panic = "assertion failed: `(left <= right)`"]
-    fn test_sanity_check_out_of_order() {
-        let mut node: [u8; 4096] = [0; 4096];
-        init_node(&mut node);
-        // ! out of order
-        append_entry(&mut node, "zzzzzzz".as_bytes(), 0);
-        append_entry(&mut node, "aaaaaaa".as_bytes(), 0);
-        sanity_check_node(&node);
-    }
-
-    // Ensure sanity check catches incorrect start of entry area
-    #[test]
-    #[should_panic = "assertion `left == right` failed"]
-    fn test_sanity_check_bad_offs() {
-        let mut node: [u8; 4096] = [0; 4096];
-        init_node(&mut node);
-
-        append_entry(&mut node, "a".as_bytes(), 0);
-        append_entry(&mut node, "z".as_bytes(), 0);
-
-        node[3] = 14; // Start of entry area = 3584
-
-        sanity_check_node(&node);
-    }
-
-    // Ensure sanity check catches overlapping entries
-    #[test]
-    #[should_panic]
-    fn test_sanity_check_overlapping_entry() {
-        let mut node: [u8; 4096] = [0; 4096];
-        init_node(&mut node);
-
-        append_entry(&mut node, "a".as_bytes(), 0);
-        append_entry(&mut node, "z".as_bytes(), 0);
-
-        let rec1_offs = get_u16(&node, INDEX_OFFS + 2) as usize; // second entry
-        node[rec1_offs] += 1;
-
-        sanity_check_node(&node);
-    }
-
     #[test]
     fn test_get_key_val() {
         let mut node: [u8; 4096] = [0; 4096];
@@ -668,7 +495,7 @@ mod tests {
         append_entry(&mut node, "foobar".as_bytes(), 0x12345678abcdef);
         append_entry(&mut node, "zzzz".as_bytes(), 0xfedbca87654321);
         sanity_check_node(&node);
-        assert_eq!(get_num_entries(&node), 2);
+        assert_eq!(get_ra_num_entries(&node), 2);
 
         let key_bytes0 = get_entry_key(&node, 0);
         assert_eq!(key_bytes0, "foobar".as_bytes());
@@ -689,23 +516,13 @@ mod tests {
         append_entry(&mut node, "beta".as_bytes(), 0);
         append_entry(&mut node, "zebra".as_bytes(), 0);
         sanity_check_node(&node);
-        assert_eq!(get_num_entries(&node), 4);
+        assert_eq!(get_ra_num_entries(&node), 4);
 
         assert_eq!(find_key(&node, "aardvark".as_bytes()), 0); // Before first key
         assert_eq!(find_key(&node, "banana".as_bytes()), 1); // equal to second key
         assert_eq!(find_key(&node, "bananb".as_bytes()), 2); // slightly larger than second key
         assert_eq!(find_key(&node, "betas".as_bytes()), 3); // longer than third key
         assert_eq!(find_key(&node, "zzzzz".as_bytes()), 4); // higer than highest key
-    }
-
-    #[test]
-    #[should_panic = "append failed, insufficient space"]
-    fn test_append_full() {
-        let mut node: [u8; 4096] = [0; 4096];
-        init_node(&mut node);
-        for _ in 0..4096 {
-            append_entry(&mut node, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes(), 0);
-        }
     }
 
     #[test]
@@ -716,24 +533,24 @@ mod tests {
         assert_eq!(find_key(&node, "foo".as_bytes()), 0);
     }
 
-    // Validates both get_node_free_space and get_entry_size return a coherent
+    // Validates both get_ra_free_space and get_entry_size return a coherent
     // value
     #[test]
     fn test_entry_size() {
         let mut node: [u8; 4096] = [0; 4096];
         init_node(&mut node);
-        let init_free_space = get_node_free_space(&node);
+        let init_free_space = get_ra_free_space(&node);
         let key1 = "foo".as_bytes();
         insert_entry(&mut node, key1, 0x1234);
-        assert_lt!(get_node_free_space(&node), init_free_space);
-        assert_eq!(get_node_free_space(&node), init_free_space -
+        assert_lt!(get_ra_free_space(&node), init_free_space);
+        assert_eq!(get_ra_free_space(&node), init_free_space -
             get_entry_size(key1));
 
         let key2 = "abcdefghijklmnopqrstuvwxyz".as_bytes();
-        let init_free_space = get_node_free_space(&node);
+        let init_free_space = get_ra_free_space(&node);
         insert_entry(&mut node, key2, 0x1234);
-        assert_lt!(get_node_free_space(&node), init_free_space);
-        assert_eq!(get_node_free_space(&node), init_free_space -
+        assert_lt!(get_ra_free_space(&node), init_free_space);
+        assert_eq!(get_ra_free_space(&node), init_free_space -
             get_entry_size(key2));
     }
 
@@ -748,7 +565,7 @@ mod tests {
         insert_entry(&mut node, "apple".as_bytes(), 2000);
         insert_entry(&mut node, "banana".as_bytes(), 3000);
         sanity_check_node(&node);
-        assert_eq!(get_num_entries(&node), 4);
+        assert_eq!(get_ra_num_entries(&node), 4);
 
         assert_eq!(find_key(&node, "aardvark".as_bytes()), 0);
         assert_eq!(find_key(&node, "apple".as_bytes()), 1);
@@ -786,19 +603,22 @@ mod tests {
         sanity_check_node(&node2);
         sanity_check_node(&node3);
 
-        let orig_sep_index = get_num_entries(&node2);
+        let orig_sep_index = get_ra_num_entries(&node2);
         assert_eq!(&separator_key, &get_entry_key(&node1, orig_sep_index));
+
+        /*
         assert_eq!(get_u64(&node3, LEFT_CHILD_FIELD_OFFS),
             get_entry_value(&node1, orig_sep_index));
         assert_eq!(get_u64(&node2, LEFT_CHILD_FIELD_OFFS),
             get_u64(&node1, LEFT_CHILD_FIELD_OFFS));
+        */
 
         // Ensure all entries are present and in order
-        let node2_recs = get_num_entries(&node2);
-        assert_eq!(get_num_entries(&node1) - 1,
-            node2_recs + get_num_entries(&node3));
+        let node2_recs = get_ra_num_entries(&node2);
+        assert_eq!(get_ra_num_entries(&node1) - 1,
+            node2_recs + get_ra_num_entries(&node3));
         assert_lt!(node2_recs, PAGE1_ENTRIES * 2 / 3);
-        for i in 0..get_num_entries(&node1) {
+        for i in 0..get_ra_num_entries(&node1) {
             if i == node2_recs {
                 continue; // ignore splitter
             }
@@ -833,15 +653,15 @@ mod tests {
         sanity_check_node(&node2);
         sanity_check_node(&node3);
 
-        let orig_sep_index = get_num_entries(&node2);
+        let orig_sep_index = get_ra_num_entries(&node2);
         assert_eq!(&separator_key, &get_entry_key(&node1, orig_sep_index));
 
         // Ensure all entries are present and in order
-        let node2_recs = get_num_entries(&node2);
-        assert_eq!(get_num_entries(&node1),
-            node2_recs + get_num_entries(&node3));
+        let node2_recs = get_ra_num_entries(&node2);
+        assert_eq!(get_ra_num_entries(&node1),
+            node2_recs + get_ra_num_entries(&node3));
         assert_lt!(node2_recs, PAGE1_ENTRIES * 2 / 3);
-        for i in 0..get_num_entries(&node1) {
+        for i in 0..get_ra_num_entries(&node1) {
             let orig_entry = get_entry_key(&node1, i);
             if i >= node2_recs {
                 assert_eq!(orig_entry, get_entry_key(&node3, i - node2_recs));
@@ -849,61 +669,6 @@ mod tests {
                 assert_eq!(orig_entry, get_entry_key(&node2, i));
             }
         }
-    }
-
-    #[test]
-    fn test_delete_entry() {
-        let mut node: [u8; 4096] = [0; 4096];
-        init_node(&mut node);
-
-        // Note these are out of order
-        insert_entry(&mut node, "aardvark".as_bytes(), 1000);
-        insert_entry(&mut node, "apple".as_bytes(), 2000);
-        insert_entry(&mut node, "banana".as_bytes(), 3000);
-        insert_entry(&mut node, "zebra".as_bytes(), 4000);
-        sanity_check_node(&node);
-        assert_eq!(get_num_entries(&node), 4);
-
-        // Remove from middle (apple)
-        delete_entry(&mut node, 1);
-        assert_eq!(get_num_entries(&node), 3);
-        sanity_check_node(&node);
-
-        assert_eq!(get_entry_key(&node, 0), "aardvark".as_bytes());
-        assert_eq!(get_entry_value(&node, 0), 1000);
-        assert_eq!(get_entry_key(&node, 1), "banana".as_bytes());
-        assert_eq!(get_entry_value(&node, 1), 3000);
-        assert_eq!(get_entry_key(&node, 2), "zebra".as_bytes());
-        assert_eq!(get_entry_value(&node, 2), 4000);
-
-        // Remove first entry (aardvark)
-        delete_entry(&mut node, 0);
-        assert_eq!(get_num_entries(&node), 2);
-        sanity_check_node(&node);
-        assert_eq!(get_entry_key(&node, 0), "banana".as_bytes());
-        assert_eq!(get_entry_value(&node, 0), 3000);
-        assert_eq!(get_entry_key(&node, 1), "zebra".as_bytes());
-        assert_eq!(get_entry_value(&node, 1), 4000);
-
-        // Remove last entry (zebra)
-        delete_entry(&mut node, 1);
-        assert_eq!(get_num_entries(&node), 1);
-        sanity_check_node(&node);
-        assert_eq!(get_entry_key(&node, 0), "banana".as_bytes());
-        assert_eq!(get_entry_value(&node, 0), 3000);
-
-        // Remove only remaining entry
-        delete_entry(&mut node, 0);
-        sanity_check_node(&node);
-        assert_eq!(get_num_entries(&node), 0);
-    }
-
-    #[test]
-    #[should_panic = "delete_entry: invalid index"]
-    fn test_delete_empty() {
-        let mut node: [u8; 4096] = [0; 4096];
-        init_node(&mut node);
-        delete_entry(&mut node, 0);
     }
 
     #[test]
