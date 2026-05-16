@@ -240,6 +240,35 @@ fn btree_insert(root_node_fpid: u64,
     }
 }
 
+fn btree_delete(root_node_fpid: u64,
+    key: &[u8],
+    value: u64,
+    page_cache: &PageCache,
+    page_allocator: &mut PageAllocator)
+{
+    // Since the btree doesn't enforce unique keys by default, we use a cursor
+    // to find the specific entry to delete (for our use cases, we know the
+    // key/value tuple will be unique, although btree code does not enforce
+    // that).
+    let mut cursor = btree_find(root_node_fpid, key, false, page_cache);
+    loop {
+        // Need to save these because cursor will post-update
+        let page_fpid = cursor.current_page_fpid;
+        let index = cursor.current_index;
+        let next = cursor.next();
+        if next.is_none() {
+            break;
+        }
+
+        let (entry_key, entry_val) = next.unwrap();
+        if key == entry_key && value == entry_val {
+            let mut page = page_cache.lock_page_mut(FilePageId(page_fpid));
+            delete_entry(&mut page, index);
+            break;
+        }
+    }
+}
+
 fn print_btree(root_node_fpid: u64, page_cache: &PageCache) {
     let mut fifo: Vec<u64> = Vec::new();
     fifo.push(root_node_fpid);
@@ -857,6 +886,18 @@ mod tests {
         assert!(!super::is_leaf(&node));
     }
 
+    fn prand_order(n: usize) -> Vec<usize> {
+        let mut result: Vec<usize> = (0..n).collect();
+        let mut seed: u32 = 12345;
+        for i in (1..n).rev() {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            let j = (seed & 0x7fffffff) as usize % n;
+            result.swap(i, j);
+        }
+
+        result
+    }
+
     #[test]
     fn test_btree_insert() {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
@@ -875,11 +916,9 @@ mod tests {
 
         const NUM_ENTRIES: usize = 120;
 
-        for i in 0..NUM_ENTRIES {
+        for i in prand_order(NUM_ENTRIES) {
             super::btree_insert(root_page, &gen_key_for_index(i), i as u64, &page_cache, &mut allocator);
         }
-
-        super::print_btree(root_page, &page_cache);
 
         let mut cursor = super::btree_iterate(root_page, false, &page_cache);
         for i in 0..NUM_ENTRIES {
@@ -904,18 +943,19 @@ mod tests {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
         let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
         let mut allocator = PageAllocator::new(&mut page_cache);
+        let root_page = allocator.alloc();
 
         {
-            let mut node = page_cache.lock_page_mut(FilePageId(1));
+            let mut node = page_cache.lock_page_mut(FilePageId(root_page));
             super::init_node(&mut node);
         }
 
-        super::btree_insert(1, "aardvark".as_bytes(), 1000, &page_cache, &mut allocator);
-        super::btree_insert(1, "apple".as_bytes(), 2000, &page_cache, &mut allocator);
-        super::btree_insert(1, "banana".as_bytes(), 3000, &page_cache, &mut allocator);
-        super::btree_insert(1, "zebra".as_bytes(), 4000, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "aardvark".as_bytes(), 1000, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "apple".as_bytes(), 2000, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "banana".as_bytes(), 3000, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "zebra".as_bytes(), 4000, &page_cache, &mut allocator);
 
-        let mut cursor = super::btree_find(1, "ab".as_bytes(), false, &page_cache);
+        let mut cursor = super::btree_find(root_page, "ab".as_bytes(), false, &page_cache);
         let Some((key, _val)) = cursor.next() else { panic!("cursor failed"); };
         assert_eq!(key.as_slice(), "apple".as_bytes());
         let Some((key, _val)) = cursor.next() else { panic!("cursor failed"); };
@@ -930,18 +970,19 @@ mod tests {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
         let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
         let mut allocator = PageAllocator::new(&mut page_cache);
+        let root_page = allocator.alloc();
 
         {
-            let mut node = page_cache.lock_page_mut(FilePageId(1));
+            let mut node = page_cache.lock_page_mut(FilePageId(root_page));
             super::init_node(&mut node);
         }
 
-        super::btree_insert(1, "aardvark".as_bytes(), 1000, &page_cache, &mut allocator);
-        super::btree_insert(1, "apple".as_bytes(), 2000, &page_cache, &mut allocator);
-        super::btree_insert(1, "banana".as_bytes(), 3000, &page_cache, &mut allocator);
-        super::btree_insert(1, "zebra".as_bytes(), 4000, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "aardvark".as_bytes(), 1000, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "apple".as_bytes(), 2000, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "banana".as_bytes(), 3000, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "zebra".as_bytes(), 4000, &page_cache, &mut allocator);
 
-        let mut cursor = super::btree_find(1, "xx".as_bytes(), true, &page_cache);
+        let mut cursor = super::btree_find(root_page, "xx".as_bytes(), true, &page_cache);
         let Some((key, _val)) = cursor.next() else { panic!("cursor failed"); };
         assert_eq!(key.as_slice(), "banana".as_bytes());
         let Some((key, _val)) = cursor.next() else { panic!("cursor failed"); };
@@ -949,5 +990,41 @@ mod tests {
         let Some((key, _val)) = cursor.next() else { panic!("cursor failed"); };
         assert_eq!(key.as_slice(), "aardvark".as_bytes());
         assert_eq!(cursor.next(), None);
+    }
+
+    #[test]
+    fn test_btree_delete() {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
+        let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
+        let mut allocator = PageAllocator::new(&mut page_cache);
+
+        let root_page = allocator.alloc();
+
+        {
+            let mut node = page_cache.lock_page_mut(FilePageId(root_page));
+            super::init_node(&mut node);
+        }
+
+        super::btree_insert(root_page, "aardvark".as_bytes(), 1000, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "aardvark".as_bytes(), 1001, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "apple".as_bytes(), 2000, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "apple".as_bytes(), 2001, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "apple".as_bytes(), 2002, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "apple".as_bytes(), 2003, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "apple".as_bytes(), 2004, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "apple".as_bytes(), 2005, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "banana".as_bytes(), 3000, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "banana".as_bytes(), 3001, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "zebra".as_bytes(), 4000, &page_cache, &mut allocator);
+
+        super::btree_delete(root_page, "apple".as_bytes(), 2001, &page_cache, &mut allocator);
+
+        let mut cursor = super::btree_iterate(root_page, true, &page_cache);
+        for i in 0..10 {
+            let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
+            assert!(key.as_slice() != "apple".as_bytes() || val != 2001);
+        }
+
+        assert!(cursor.next().is_none());
     }
 }
