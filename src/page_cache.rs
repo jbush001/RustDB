@@ -64,7 +64,7 @@ impl LRUEvictionPolicy {
             }
             None => {
                 assert!(self.head.unwrap() == id);
-                self.head = self.next[id.0]; // XXX BUG BUB BUG
+                self.head = self.next[id.0];
             }
         }
     }
@@ -342,10 +342,45 @@ mod tests {
         f(borrowed.as_any_mut().downcast_mut::<MockIO>().unwrap());
     }
 
+    fn sanity_check_lru(lru: &super::LRUEvictionPolicy) {
+        assert_eq!(lru.head.is_some(), lru.tail.is_some());
+        if lru.head.is_none() {
+            return;
+        }
+
+        assert_eq!(lru.next.len(), lru.prev.len());
+        let mut node = lru.head;
+        let mut forward_len: usize = 0;
+        for i in 0..lru.next.len() + 1 {
+            forward_len += 1;
+            if lru.next[node.unwrap().0 as usize].is_none() {
+                assert_eq!(node, lru.tail);
+                break;
+            } else {
+                node = lru.next[node.unwrap().0 as usize];
+            }
+        }
+
+        let mut node = lru.tail;
+        let mut reverse_len: usize = 0;
+        for i in 0..lru.next.len() + 1 {
+            reverse_len += 1;
+            if lru.prev[node.unwrap().0 as usize].is_none() {
+                assert_eq!(node, lru.head);
+                break;
+            } else {
+                node = lru.prev[node.unwrap().0 as usize];
+            }
+        }
+
+        assert_eq!(forward_len, reverse_len);
+    }
+
     // Eviction policy tests
     #[test]
     fn test_ep_evict_empty() {
         let mut policy = super::LRUEvictionPolicy::new(10);
+        sanity_check_lru(&policy);
         assert_eq!(policy.evict(), None);
     }
 
@@ -353,6 +388,7 @@ mod tests {
     fn test_ep_evict_one() {
         let mut policy = super::LRUEvictionPolicy::new(10);
         policy.insert(super::CachePageId(1));
+        sanity_check_lru(&policy);
         assert_eq!(policy.evict(), Some(super::CachePageId(1)));
         assert_eq!(policy.evict(), None);
     }
@@ -364,11 +400,17 @@ mod tests {
         policy.insert(super::CachePageId(2));
         policy.insert(super::CachePageId(3));
         policy.insert(super::CachePageId(4));
+        sanity_check_lru(&policy);
         assert_eq!(policy.evict(), Some(super::CachePageId(1)));
+        sanity_check_lru(&policy);
         assert_eq!(policy.evict(), Some(super::CachePageId(2)));
+        sanity_check_lru(&policy);
         assert_eq!(policy.evict(), Some(super::CachePageId(3)));
+        sanity_check_lru(&policy);
         assert_eq!(policy.evict(), Some(super::CachePageId(4)));
+        sanity_check_lru(&policy);
         assert_eq!(policy.evict(), None);
+        sanity_check_lru(&policy);
     }
 
     #[test]
@@ -378,8 +420,10 @@ mod tests {
         policy.insert(super::CachePageId(2));
         policy.insert(super::CachePageId(3));
         policy.remove(super::CachePageId(2));
+        sanity_check_lru(&policy);
         assert_eq!(policy.evict(), Some(super::CachePageId(1)));
         assert_eq!(policy.evict(), Some(super::CachePageId(3)));
+        sanity_check_lru(&policy);
     }
 
     // Regression test
@@ -387,10 +431,15 @@ mod tests {
     fn test_ep_remove_head() {
         let mut policy = super::LRUEvictionPolicy::new(10);
         policy.insert(super::CachePageId(1));
+        sanity_check_lru(&policy);
         policy.insert(super::CachePageId(2));
+        sanity_check_lru(&policy);
         policy.remove(super::CachePageId(2));
+        sanity_check_lru(&policy);
         assert_eq!(policy.evict(), Some(super::CachePageId(1)));
+        sanity_check_lru(&policy);
         assert_eq!(policy.evict(), None);
+        sanity_check_lru(&policy);
     }
 
     // Page cache tests

@@ -169,6 +169,9 @@ fn btree_insert(root_node_fpid: u64,
         } else {
             current_node_fpid = get_entry_value(&page, index - 1);
         }
+
+        // This would indicate the tree doesn't has interior nodes that don't
+        // have leaves
         assert!(current_node_fpid != INVALID_FPID);
     }
 
@@ -188,6 +191,7 @@ fn btree_insert(root_node_fpid: u64,
             // Root node splits are special
             let new_page_fpid1 = page_allocator.alloc();
             let new_page_fpid2 = page_allocator.alloc();
+
             let mut new_page1 = page_cache.lock_page_mut(FilePageId(new_page_fpid1));
             let mut new_page2 = page_cache.lock_page_mut(FilePageId(new_page_fpid2));
             let split_key = split_node(&page, &mut new_page1, &mut new_page2);
@@ -243,8 +247,7 @@ fn btree_insert(root_node_fpid: u64,
 fn btree_delete(root_node_fpid: u64,
     key: &[u8],
     value: u64,
-    page_cache: &PageCache,
-    page_allocator: &mut PageAllocator)
+    page_cache: &PageCache)
 {
     // Since the btree doesn't enforce unique keys by default, we use a cursor
     // to find the specific entry to delete (for our use cases, we know the
@@ -461,7 +464,8 @@ fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
 
     if !is_leaf(orig) {
         // Remove the separator key, which will go into the parent. Save its value
-        // into the right child.
+        // into the left child.
+        assert!(get_entry_value(orig, orig_index) != 0);
         set_u64(out2, LEFT_CHILD_FIELD_OFFS, get_entry_value(orig, orig_index));
         orig_index += 1;
     }
@@ -473,6 +477,7 @@ fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
         orig_index += 1;
     }
 
+    assert!(get_entry_value(orig, LEFT_CHILD_FIELD_OFFS) != 0);
     set_u64(out1, LEFT_CHILD_FIELD_OFFS, get_u64(orig, LEFT_CHILD_FIELD_OFFS));
 
     separator
@@ -517,18 +522,35 @@ mod tests {
     use std::cell::RefCell;
     use crate::page_cache::*;
     use std::any::Any;
+    use std::collections::HashSet;
 
     #[derive(Default)]
     struct MockIO {
+        loaded_pages: HashSet<u64>
+    }
+
+    impl MockIO {
+        fn default() -> Self {
+            Self {
+                loaded_pages: HashSet::new()
+            }
+        }
     }
 
     impl PersistentStore for MockIO {
-        fn read(&mut self, _offset: u64, slice: &mut [u8]) {
+        fn read(&mut self, offset: u64, slice: &mut [u8]) {
+            if self.loaded_pages.contains(&offset) {
+                // This indicates the page cache evicted a page and is trying to
+                // reload it. Since we're not testing page cache here, we should
+                // just make it large enough that it doesn't need to evict.
+                panic!("reloaded pages: make PageCache larger");
+            }
+
+            self.loaded_pages.insert(offset);
             slice.fill(0);
         }
 
         fn write(&mut self, _offset: u64, _slice: &[u8]) {
-            // This shouldn't be called
         }
 
         fn as_any(&self) -> &dyn Any {
@@ -586,6 +608,15 @@ mod tests {
             assert_le!(last_key, this_key);
             last_key = this_key;
         }
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_persistent_store_reread() {
+        let mut mock_io = MockIO::default();
+        let mut temp: [u8; 4096] = [0; 4096];
+        mock_io.read(0, &mut temp);
+        mock_io.read(0, &mut temp);
     }
 
     // Ensure sanity check catches out of order entries
@@ -898,10 +929,13 @@ mod tests {
         result
     }
 
-    #[test]
-    fn test_btree_insert() {
+    fn gen_key_for_index(index: usize) -> Vec<u8> {
+        vec![index as u8; (index % 64) + 64]
+    }
+
+    fn build_btree(num_entries: usize) -> (PageCache, PageAllocator, u64) {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
-        let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
+        let mut page_cache = PageCache::new(50, Rc::clone(&mock_io));
         let mut allocator = PageAllocator::new(&mut page_cache);
 
         let root_page = allocator.alloc();
@@ -910,24 +944,31 @@ mod tests {
             super::init_node(&mut node);
         }
 
-        fn gen_key_for_index(index: usize) -> Vec<u8> {
-            vec![index as u8; 128]
+        for i in prand_order(num_entries) {
+            super::btree_insert(root_page, &gen_key_for_index(i), i as u64,
+                &page_cache, &mut allocator);
         }
 
+        (page_cache, allocator, root_page)
+    }
+
+    #[test]
+    fn test_valid_btree_create() {
         const NUM_ENTRIES: usize = 120;
-
-        for i in prand_order(NUM_ENTRIES) {
-            super::btree_insert(root_page, &gen_key_for_index(i), i as u64, &page_cache, &mut allocator);
-        }
-
+        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
         let mut cursor = super::btree_iterate(root_page, false, &page_cache);
         for i in 0..NUM_ENTRIES {
             let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
             assert_eq!(val, i as u64);
         }
+    }
 
-        // Scan it backwards to ensure prev pointers are correct
+    #[test]
+    fn test_btree_backward_scan() {
+        const NUM_ENTRIES: usize = 120;
+        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+
         let mut cursor = super::btree_iterate(root_page, true, &page_cache);
         for i in (0..NUM_ENTRIES).rev() {
             let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
@@ -939,57 +980,30 @@ mod tests {
     }
 
     #[test]
-    fn test_start_from_cursor() {
-        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
-        let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
-        let mut allocator = PageAllocator::new(&mut page_cache);
-        let root_page = allocator.alloc();
+    fn test_btree_find() {
+        const NUM_ENTRIES: usize = 120;
+        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
-        {
-            let mut node = page_cache.lock_page_mut(FilePageId(root_page));
-            super::init_node(&mut node);
+        const START_KEY_IDX: usize = 55;
+        let mut cursor = super::btree_find(root_page, &gen_key_for_index(START_KEY_IDX), false, &page_cache);
+        for i in START_KEY_IDX..START_KEY_IDX + 10 {
+            let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
+            assert_eq!(key.as_slice(), &gen_key_for_index(i));
+            assert_eq!(val, i as u64);
         }
-
-        super::btree_insert(root_page, "aardvark".as_bytes(), 1000, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "apple".as_bytes(), 2000, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "banana".as_bytes(), 3000, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "zebra".as_bytes(), 4000, &page_cache, &mut allocator);
-
-        let mut cursor = super::btree_find(root_page, "ab".as_bytes(), false, &page_cache);
-        let Some((key, _val)) = cursor.next() else { panic!("cursor failed"); };
-        assert_eq!(key.as_slice(), "apple".as_bytes());
-        let Some((key, _val)) = cursor.next() else { panic!("cursor failed"); };
-        assert_eq!(key.as_slice(), "banana".as_bytes());
-        let Some((key, _val)) = cursor.next() else { panic!("cursor failed"); };
-        assert_eq!(key.as_slice(), "zebra".as_bytes());
-        assert_eq!(cursor.next(), None);
     }
 
+    // Get the first node in the tree, which requires traversing the left child node.
     #[test]
-    fn test_start_from_cursor_reverse() {
-        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
-        let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
-        let mut allocator = PageAllocator::new(&mut page_cache);
-        let root_page = allocator.alloc();
+    fn test_btree_find_begin() {
+        const NUM_ENTRIES: usize = 120;
+        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
-        {
-            let mut node = page_cache.lock_page_mut(FilePageId(root_page));
-            super::init_node(&mut node);
-        }
-
-        super::btree_insert(root_page, "aardvark".as_bytes(), 1000, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "apple".as_bytes(), 2000, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "banana".as_bytes(), 3000, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "zebra".as_bytes(), 4000, &page_cache, &mut allocator);
-
-        let mut cursor = super::btree_find(root_page, "xx".as_bytes(), true, &page_cache);
-        let Some((key, _val)) = cursor.next() else { panic!("cursor failed"); };
-        assert_eq!(key.as_slice(), "banana".as_bytes());
-        let Some((key, _val)) = cursor.next() else { panic!("cursor failed"); };
-        assert_eq!(key.as_slice(), "apple".as_bytes());
-        let Some((key, _val)) = cursor.next() else { panic!("cursor failed"); };
-        assert_eq!(key.as_slice(), "aardvark".as_bytes());
-        assert_eq!(cursor.next(), None);
+        const START_KEY_IDX: usize = 55;
+        let mut cursor = super::btree_find(root_page, &[0u8], false, &page_cache);
+        let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
+        assert_eq!(key.as_slice(), &gen_key_for_index(0));
+        assert_eq!(val, 0u64);
     }
 
     #[test]
@@ -1017,14 +1031,53 @@ mod tests {
         super::btree_insert(root_page, "banana".as_bytes(), 3001, &page_cache, &mut allocator);
         super::btree_insert(root_page, "zebra".as_bytes(), 4000, &page_cache, &mut allocator);
 
-        super::btree_delete(root_page, "apple".as_bytes(), 2001, &page_cache, &mut allocator);
+        super::btree_delete(root_page, "apple".as_bytes(), 2001, &page_cache);
 
         let mut cursor = super::btree_iterate(root_page, true, &page_cache);
-        for i in 0..10 {
+        for _ in 0..10 {
             let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
             assert!(key.as_slice() != "apple".as_bytes() || val != 2001);
         }
 
         assert!(cursor.next().is_none());
+    }
+
+    #[test]
+    fn test_btree_delete_not_present() {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
+        let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
+        let mut allocator = PageAllocator::new(&mut page_cache);
+
+        let root_page = allocator.alloc();
+
+        {
+            let mut node = page_cache.lock_page_mut(FilePageId(root_page));
+            super::init_node(&mut node);
+        }
+
+        super::btree_insert(root_page, "aardvark".as_bytes(), 1000, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "apple".as_bytes(), 2000, &page_cache, &mut allocator);
+        super::btree_insert(root_page, "banana".as_bytes(), 3000, &page_cache, &mut allocator);
+
+        super::btree_delete(root_page, "apple".as_bytes(), 2001, &page_cache);
+
+        let mut cursor = super::btree_iterate(root_page, false, &page_cache);
+        let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
+        assert_eq!(key.as_slice(), "aardvark".as_bytes());
+        assert_eq!(val, 1000);
+        let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
+        assert_eq!(key.as_slice(), "apple".as_bytes());
+        assert_eq!(val, 2000);
+        let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
+        assert_eq!(key.as_slice(), "banana".as_bytes());
+        assert_eq!(val, 3000);
+        assert!(cursor.next().is_none());
+    }
+
+    // Just ensures it doesn't crash...
+    #[test]
+    fn test_print_btree() {
+        let (page_cache, _alloc, root_page) = build_btree(50);
+        let mut cursor = super::print_btree(root_page, &page_cache);
     }
 }
