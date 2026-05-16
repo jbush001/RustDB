@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use std::any::Any;
 use std::ops::{Deref, DerefMut};
 
-const PAGE_SIZE: usize = 4096;
+pub const PAGE_SIZE: usize = 4096;
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
 pub struct FilePageId(pub u64);
@@ -48,19 +48,23 @@ impl LRUEvictionPolicy {
     fn remove(&mut self, id: CachePageId) {
         match self.next[id.0] {
             Some(next_id) => {
+                assert!(self.tail != Some(id));
                 self.prev[next_id.0] = self.prev[id.0];
             }
             None => {
+                assert!(self.tail.unwrap() == id);
                 self.tail = self.prev[id.0];
             }
         }
 
         match self.prev[id.0] {
             Some(prev_id) => {
+                assert!(self.head != Some(id));
                 self.next[prev_id.0] = self.next[id.0];
             }
             None => {
-                self.tail = self.next[id.0];
+                assert!(self.head.unwrap() == id);
+                self.head = self.next[id.0]; // XXX BUG BUB BUG
             }
         }
     }
@@ -376,6 +380,17 @@ mod tests {
         policy.remove(super::CachePageId(2));
         assert_eq!(policy.evict(), Some(super::CachePageId(1)));
         assert_eq!(policy.evict(), Some(super::CachePageId(3)));
+    }
+
+    // Regression test
+    #[test]
+    fn test_ep_remove_head() {
+        let mut policy = super::LRUEvictionPolicy::new(10);
+        policy.insert(super::CachePageId(1));
+        policy.insert(super::CachePageId(2));
+        policy.remove(super::CachePageId(2));
+        assert_eq!(policy.evict(), Some(super::CachePageId(1)));
+        assert_eq!(policy.evict(), None);
     }
 
     // Page cache tests
