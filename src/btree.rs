@@ -170,9 +170,7 @@ fn btree_insert(root_node_fpid: u64,
             current_node_fpid = get_entry_value(&page, index - 1);
         }
 
-        // This would indicate the tree doesn't has interior nodes that don't
-        // have leaves
-        assert!(current_node_fpid != INVALID_FPID);
+        assert!(current_node_fpid != INVALID_FPID, "invalid tree: interior node has non-leaf children");
     }
 
     // We're now at a leaf. Insert and walk back up the tree splitting nodes
@@ -346,7 +344,7 @@ fn get_entry_offs(node: &[u8], rec_num: usize) -> usize {
 }
 
 fn get_entry_key(node: &[u8], rec_num: usize) -> &[u8] {
-    assert!(rec_num < get_num_entries(node));
+    assert!(rec_num < get_num_entries(node), "record number of of bounds");
 
     let entry_offs = get_entry_offs(node, rec_num);
     let key_len = get_u16(node, entry_offs) as usize;
@@ -357,7 +355,7 @@ fn get_entry_key(node: &[u8], rec_num: usize) -> &[u8] {
 
 fn get_entry_value(node: &[u8], rec_num: usize) -> u64 {
     let num_entries = get_num_entries(node);
-    assert!(rec_num <= num_entries);
+    assert!(rec_num <= num_entries, "record number of of bounds");
 
     let entry_offs = get_entry_offs(node, rec_num);
     let key_len = get_u16(node, entry_offs) as usize;
@@ -389,7 +387,7 @@ fn find_key(node: &[u8], key: &[u8]) -> usize {
 
 // Insert a entry into a single node.
 fn insert_entry(node: &mut [u8], key: &[u8], value: u64) {
-    assert!(get_node_free_space(node) >= key.len() + 12);
+    assert!(get_node_free_space(node) >= key.len() + 12, "insert failed: insufficient space");
 
     let num_recs = get_num_entries(node);
     let new_slot = find_key(node, key);
@@ -417,7 +415,7 @@ fn insert_entry(node: &mut [u8], key: &[u8], value: u64) {
 // Returns entry size
 fn append_entry(node: &mut [u8], key: &[u8], value: u64) -> usize {
     // 8 bytes for the value, 2 for the entry length, 2 for the index entry
-    assert!(get_node_free_space(node) >= key.len() + 12);
+    assert!(get_node_free_space(node) >= key.len() + 12, "append failed, insufficient space");
 
     let entry_length = 2 + key.len() + 8;
     let entry_offs = get_u16(node, ENTRY_START_FIELD_OFFS) as usize - entry_length;
@@ -465,7 +463,6 @@ fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
     if !is_leaf(orig) {
         // Remove the separator key, which will go into the parent. Save its value
         // into the left child.
-        assert!(get_entry_value(orig, orig_index) != 0);
         set_u64(out2, LEFT_CHILD_FIELD_OFFS, get_entry_value(orig, orig_index));
         orig_index += 1;
     }
@@ -477,7 +474,7 @@ fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
         orig_index += 1;
     }
 
-    assert!(get_entry_value(orig, LEFT_CHILD_FIELD_OFFS) != 0);
+    assert!(get_entry_value(orig, LEFT_CHILD_FIELD_OFFS) != 0, "left child is 0");
     set_u64(out1, LEFT_CHILD_FIELD_OFFS, get_u64(orig, LEFT_CHILD_FIELD_OFFS));
 
     separator
@@ -485,7 +482,7 @@ fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
 
 fn delete_entry(node: &mut [u8], index: usize) {
     let total_recs = get_num_entries(node);
-    assert!(index < total_recs);
+    assert!(index < total_recs, "delete_entry: invalid index");
 
     let deleted_entry_offs = get_u16(node, INDEX_OFFS + index * 2) as usize;
     let deleted_entry_len = get_u16(node, deleted_entry_offs) as usize + 10;
@@ -523,6 +520,7 @@ mod tests {
     use crate::page_cache::*;
     use std::any::Any;
     use std::collections::HashSet;
+    use super::*;
 
     #[derive(Default)]
     struct MockIO {
@@ -570,13 +568,13 @@ mod tests {
         if num_entries == 0 {
             // Ensure first offs in header is correct
             let header_first_offs = get_u16(node, 2) as usize;
-            assert_eq!(node.len(), header_first_offs);
+            assert_eq!(node.len(), header_first_offs, "header_first_offs is incorrect");
             return
         }
 
         for i in 0..num_entries {
-            let rec_offs = get_u16(node, super::INDEX_OFFS + i * 2) as usize;
-            assert_lt!(rec_offs, node.len());
+            let rec_offs = get_u16(node, INDEX_OFFS + i * 2) as usize;
+            assert_lt!(rec_offs, node.len(), "record offset out of range");
             sorted_rec_offs.push(rec_offs);
         }
 
@@ -586,7 +584,7 @@ mod tests {
 
         // Ensure first offs in header is correct
         let header_first_offs = get_u16(node, 2) as usize;
-        assert_eq!(sorted_rec_offs[0], header_first_offs);
+        assert_eq!(sorted_rec_offs[0], header_first_offs, "first offset is incorrect");
 
         // Now ensure the entry are packed end-to-end, the lengths are in
         // the node.
@@ -594,24 +592,24 @@ mod tests {
         for rec_offs in sorted_rec_offs {
             assert_eq!(rec_offs, last_entry_end); // ensure non-overlapping
             last_entry_end = rec_offs + get_u16(node, rec_offs) as usize + 10;
-            assert_le!(last_entry_end, node.len()); // Ensure it doesn't spill off node
+            assert_le!(last_entry_end, node.len(), "record length out of bounds"); // Ensure it doesn't spill off node
         }
 
         // Ensure the keys are in order
         let mut last_key: &[u8] = &[0];
         for i in 0..num_entries {
-            let entry_offs = get_u16(node, super::INDEX_OFFS + i * 2) as usize;
+            let entry_offs = get_u16(node, INDEX_OFFS + i * 2) as usize;
             let key_len = get_u16(&node, entry_offs) as usize;
             let key_start = entry_offs + 2;
 
             let this_key = &node[key_start..key_start + key_len];
-            assert_le!(last_key, this_key);
+            assert_le!(last_key, this_key, "keys are out of order");
             last_key = this_key;
         }
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic = "reloaded pages: make PageCache larger"]
     fn test_persistent_store_reread() {
         let mut mock_io = MockIO::default();
         let mut temp: [u8; 4096] = [0; 4096];
@@ -621,25 +619,25 @@ mod tests {
 
     // Ensure sanity check catches out of order entries
     #[test]
-    #[should_panic]
+    #[should_panic = "assertion failed: `(left <= right)`"]
     fn test_sanity_check_out_of_order() {
         let mut node: [u8; 4096] = [0; 4096];
-        super::init_node(&mut node);
+        init_node(&mut node);
         // ! out of order
-        super::append_entry(&mut node, "zzzzzzz".as_bytes(), 0);
-        super::append_entry(&mut node, "aaaaaaa".as_bytes(), 0);
+        append_entry(&mut node, "zzzzzzz".as_bytes(), 0);
+        append_entry(&mut node, "aaaaaaa".as_bytes(), 0);
         sanity_check_node(&node);
     }
 
     // Ensure sanity check catches incorrect start of entry area
     #[test]
-    #[should_panic]
+    #[should_panic = "assertion `left == right` failed"]
     fn test_sanity_check_bad_offs() {
         let mut node: [u8; 4096] = [0; 4096];
-        super::init_node(&mut node);
+        init_node(&mut node);
 
-        super::append_entry(&mut node, "a".as_bytes(), 0);
-        super::append_entry(&mut node, "z".as_bytes(), 0);
+        append_entry(&mut node, "a".as_bytes(), 0);
+        append_entry(&mut node, "z".as_bytes(), 0);
 
         node[3] = 14; // Start of entry area = 3584
 
@@ -651,12 +649,12 @@ mod tests {
     #[should_panic]
     fn test_sanity_check_overlapping_entry() {
         let mut node: [u8; 4096] = [0; 4096];
-        super::init_node(&mut node);
+        init_node(&mut node);
 
-        super::append_entry(&mut node, "a".as_bytes(), 0);
-        super::append_entry(&mut node, "z".as_bytes(), 0);
+        append_entry(&mut node, "a".as_bytes(), 0);
+        append_entry(&mut node, "z".as_bytes(), 0);
 
-        let rec1_offs = get_u16(&node, super::INDEX_OFFS + 2) as usize; // second entry
+        let rec1_offs = get_u16(&node, INDEX_OFFS + 2) as usize; // second entry
         node[rec1_offs] += 1;
 
         sanity_check_node(&node);
@@ -665,57 +663,57 @@ mod tests {
     #[test]
     fn test_get_key_val() {
         let mut node: [u8; 4096] = [0; 4096];
-        super::init_node(&mut node);
+        init_node(&mut node);
 
-        super::append_entry(&mut node, "foobar".as_bytes(), 0x12345678abcdef);
-        super::append_entry(&mut node, "zzzz".as_bytes(), 0xfedbca87654321);
+        append_entry(&mut node, "foobar".as_bytes(), 0x12345678abcdef);
+        append_entry(&mut node, "zzzz".as_bytes(), 0xfedbca87654321);
         sanity_check_node(&node);
-        assert_eq!(super::get_num_entries(&node), 2);
+        assert_eq!(get_num_entries(&node), 2);
 
-        let key_bytes0 = super::get_entry_key(&node, 0);
+        let key_bytes0 = get_entry_key(&node, 0);
         assert_eq!(key_bytes0, "foobar".as_bytes());
-        assert_eq!(super::get_entry_value(&node, 0), 0x12345678abcdef);
+        assert_eq!(get_entry_value(&node, 0), 0x12345678abcdef);
 
-        let key_bytes1 = super::get_entry_key(&node, 1);
+        let key_bytes1 = get_entry_key(&node, 1);
         assert_eq!(key_bytes1, "zzzz".as_bytes());
-        assert_eq!(super::get_entry_value(&node, 1), 0xfedbca87654321);
+        assert_eq!(get_entry_value(&node, 1), 0xfedbca87654321);
     }
 
     #[test]
     fn test_find() {
         let mut node: [u8; 4096] = [0; 4096];
-        super::init_node(&mut node);
+        init_node(&mut node);
 
-        super::append_entry(&mut node, "abacus".as_bytes(), 0);
-        super::append_entry(&mut node, "banana".as_bytes(), 0);
-        super::append_entry(&mut node, "beta".as_bytes(), 0);
-        super::append_entry(&mut node, "zebra".as_bytes(), 0);
+        append_entry(&mut node, "abacus".as_bytes(), 0);
+        append_entry(&mut node, "banana".as_bytes(), 0);
+        append_entry(&mut node, "beta".as_bytes(), 0);
+        append_entry(&mut node, "zebra".as_bytes(), 0);
         sanity_check_node(&node);
-        assert_eq!(super::get_num_entries(&node), 4);
+        assert_eq!(get_num_entries(&node), 4);
 
-        assert_eq!(super::find_key(&node, "aardvark".as_bytes()), 0); // Before first key
-        assert_eq!(super::find_key(&node, "banana".as_bytes()), 1); // equal to second key
-        assert_eq!(super::find_key(&node, "bananb".as_bytes()), 2); // slightly larger than second key
-        assert_eq!(super::find_key(&node, "betas".as_bytes()), 3); // longer than third key
-        assert_eq!(super::find_key(&node, "zzzzz".as_bytes()), 4); // higer than highest key
+        assert_eq!(find_key(&node, "aardvark".as_bytes()), 0); // Before first key
+        assert_eq!(find_key(&node, "banana".as_bytes()), 1); // equal to second key
+        assert_eq!(find_key(&node, "bananb".as_bytes()), 2); // slightly larger than second key
+        assert_eq!(find_key(&node, "betas".as_bytes()), 3); // longer than third key
+        assert_eq!(find_key(&node, "zzzzz".as_bytes()), 4); // higer than highest key
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic = "append failed, insufficient space"]
     fn test_append_full() {
         let mut node: [u8; 4096] = [0; 4096];
-        super::init_node(&mut node);
+        init_node(&mut node);
         for _ in 0..4096 {
-            super::append_entry(&mut node, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes(), 0);
+            append_entry(&mut node, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes(), 0);
         }
     }
 
     #[test]
     fn test_find_key_empty() {
         let mut node: [u8; 4096] = [0; 4096];
-        super::init_node(&mut node);
+        init_node(&mut node);
 
-        assert_eq!(super::find_key(&node, "foo".as_bytes()), 0);
+        assert_eq!(find_key(&node, "foo".as_bytes()), 0);
     }
 
     // Validates both get_node_free_space and get_entry_size return a coherent
@@ -723,48 +721,48 @@ mod tests {
     #[test]
     fn test_entry_size() {
         let mut node: [u8; 4096] = [0; 4096];
-        super::init_node(&mut node);
-        let init_free_space = super::get_node_free_space(&node);
+        init_node(&mut node);
+        let init_free_space = get_node_free_space(&node);
         let key1 = "foo".as_bytes();
-        super::insert_entry(&mut node, key1, 0x1234);
-        assert_lt!(super::get_node_free_space(&node), init_free_space);
-        assert_eq!(super::get_node_free_space(&node), init_free_space -
-            super::get_entry_size(key1));
+        insert_entry(&mut node, key1, 0x1234);
+        assert_lt!(get_node_free_space(&node), init_free_space);
+        assert_eq!(get_node_free_space(&node), init_free_space -
+            get_entry_size(key1));
 
         let key2 = "abcdefghijklmnopqrstuvwxyz".as_bytes();
-        let init_free_space = super::get_node_free_space(&node);
-        super::insert_entry(&mut node, key2, 0x1234);
-        assert_lt!(super::get_node_free_space(&node), init_free_space);
-        assert_eq!(super::get_node_free_space(&node), init_free_space -
-            super::get_entry_size(key2));
+        let init_free_space = get_node_free_space(&node);
+        insert_entry(&mut node, key2, 0x1234);
+        assert_lt!(get_node_free_space(&node), init_free_space);
+        assert_eq!(get_node_free_space(&node), init_free_space -
+            get_entry_size(key2));
     }
 
     #[test]
     fn test_insert_entry() {
         let mut node: [u8; 4096] = [0; 4096];
-        super::init_node(&mut node);
+        init_node(&mut node);
 
         // Note these are out of order
-        super::insert_entry(&mut node, "aardvark".as_bytes(), 1000);
-        super::insert_entry(&mut node, "zebra".as_bytes(), 4000);
-        super::insert_entry(&mut node, "apple".as_bytes(), 2000);
-        super::insert_entry(&mut node, "banana".as_bytes(), 3000);
+        insert_entry(&mut node, "aardvark".as_bytes(), 1000);
+        insert_entry(&mut node, "zebra".as_bytes(), 4000);
+        insert_entry(&mut node, "apple".as_bytes(), 2000);
+        insert_entry(&mut node, "banana".as_bytes(), 3000);
         sanity_check_node(&node);
-        assert_eq!(super::get_num_entries(&node), 4);
+        assert_eq!(get_num_entries(&node), 4);
 
-        assert_eq!(super::find_key(&node, "aardvark".as_bytes()), 0);
-        assert_eq!(super::find_key(&node, "apple".as_bytes()), 1);
-        assert_eq!(super::find_key(&node, "banana".as_bytes()), 2);
-        assert_eq!(super::find_key(&node, "zebra".as_bytes()), 3);
+        assert_eq!(find_key(&node, "aardvark".as_bytes()), 0);
+        assert_eq!(find_key(&node, "apple".as_bytes()), 1);
+        assert_eq!(find_key(&node, "banana".as_bytes()), 2);
+        assert_eq!(find_key(&node, "zebra".as_bytes()), 3);
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic = "insert failed: insufficient space"]
     fn test_insert_entry_full() {
         let mut node: [u8; 4096] = [0; 4096];
-        super::init_node(&mut node);
+        init_node(&mut node);
         for _ in 0..4096 {
-            super::insert_entry(&mut node, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes(), 0);
+            insert_entry(&mut node, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes(), 0);
         }
     }
 
@@ -774,42 +772,42 @@ mod tests {
         let mut node2: [u8; 4096] = [0; 4096];
         let mut node3: [u8; 4096] = [0; 4096];
 
-        super::init_node(&mut node1);
+        init_node(&mut node1);
         node1[0] = 0; // Clear leaf flag
         const PAGE1_ENTRIES: usize = 25;
         for i in 0..PAGE1_ENTRIES {
             let key = vec![b'A' + i as u8; 128];
-            super::insert_entry(&mut node1, &key, i as u64);
+            insert_entry(&mut node1, &key, i as u64);
         }
 
         sanity_check_node(&node1);
 
-        let separator_key = super::split_node(&node1, &mut node2, &mut node3);
+        let separator_key = split_node(&node1, &mut node2, &mut node3);
         sanity_check_node(&node2);
         sanity_check_node(&node3);
 
-        let orig_sep_index = super::get_num_entries(&node2);
-        assert_eq!(&separator_key, &super::get_entry_key(&node1, orig_sep_index));
-        assert_eq!(get_u64(&node3, super::LEFT_CHILD_FIELD_OFFS),
-            super::get_entry_value(&node1, orig_sep_index));
-        assert_eq!(get_u64(&node2, super::LEFT_CHILD_FIELD_OFFS),
-            get_u64(&node1, super::LEFT_CHILD_FIELD_OFFS));
+        let orig_sep_index = get_num_entries(&node2);
+        assert_eq!(&separator_key, &get_entry_key(&node1, orig_sep_index));
+        assert_eq!(get_u64(&node3, LEFT_CHILD_FIELD_OFFS),
+            get_entry_value(&node1, orig_sep_index));
+        assert_eq!(get_u64(&node2, LEFT_CHILD_FIELD_OFFS),
+            get_u64(&node1, LEFT_CHILD_FIELD_OFFS));
 
         // Ensure all entries are present and in order
-        let node2_recs = super::get_num_entries(&node2);
-        assert_eq!(super::get_num_entries(&node1) - 1,
-            node2_recs + super::get_num_entries(&node3));
+        let node2_recs = get_num_entries(&node2);
+        assert_eq!(get_num_entries(&node1) - 1,
+            node2_recs + get_num_entries(&node3));
         assert_lt!(node2_recs, PAGE1_ENTRIES * 2 / 3);
-        for i in 0..super::get_num_entries(&node1) {
+        for i in 0..get_num_entries(&node1) {
             if i == node2_recs {
                 continue; // ignore splitter
             }
 
-            let orig_entry = super::get_entry_key(&node1, i);
+            let orig_entry = get_entry_key(&node1, i);
             if i > node2_recs {
-                assert_eq!(orig_entry, super::get_entry_key(&node3, i - node2_recs - 1));
+                assert_eq!(orig_entry, get_entry_key(&node3, i - node2_recs - 1));
             } else {
-                assert_eq!(orig_entry, super::get_entry_key(&node2, i));
+                assert_eq!(orig_entry, get_entry_key(&node2, i));
             }
         }
     }
@@ -820,35 +818,35 @@ mod tests {
         let mut node2: [u8; 4096] = [0; 4096];
         let mut node3: [u8; 4096] = [0; 4096];
 
-        super::init_node(&mut node1);
-        set_u16(&mut node1, 0, super::FLAG_LEAF);
+        init_node(&mut node1);
+        set_u16(&mut node1, 0, FLAG_LEAF);
 
         const PAGE1_ENTRIES: usize = 25;
         for i in 0..PAGE1_ENTRIES {
             let key = vec![b'A' + i as u8; 128];
-            super::insert_entry(&mut node1, &key, i as u64);
+            insert_entry(&mut node1, &key, i as u64);
         }
 
         sanity_check_node(&node1);
 
-        let separator_key = super::split_node(&node1, &mut node2, &mut node3);
+        let separator_key = split_node(&node1, &mut node2, &mut node3);
         sanity_check_node(&node2);
         sanity_check_node(&node3);
 
-        let orig_sep_index = super::get_num_entries(&node2);
-        assert_eq!(&separator_key, &super::get_entry_key(&node1, orig_sep_index));
+        let orig_sep_index = get_num_entries(&node2);
+        assert_eq!(&separator_key, &get_entry_key(&node1, orig_sep_index));
 
         // Ensure all entries are present and in order
-        let node2_recs = super::get_num_entries(&node2);
-        assert_eq!(super::get_num_entries(&node1),
-            node2_recs + super::get_num_entries(&node3));
+        let node2_recs = get_num_entries(&node2);
+        assert_eq!(get_num_entries(&node1),
+            node2_recs + get_num_entries(&node3));
         assert_lt!(node2_recs, PAGE1_ENTRIES * 2 / 3);
-        for i in 0..super::get_num_entries(&node1) {
-            let orig_entry = super::get_entry_key(&node1, i);
+        for i in 0..get_num_entries(&node1) {
+            let orig_entry = get_entry_key(&node1, i);
             if i >= node2_recs {
-                assert_eq!(orig_entry, super::get_entry_key(&node3, i - node2_recs));
+                assert_eq!(orig_entry, get_entry_key(&node3, i - node2_recs));
             } else {
-                assert_eq!(orig_entry, super::get_entry_key(&node2, i));
+                assert_eq!(orig_entry, get_entry_key(&node2, i));
             }
         }
     }
@@ -856,65 +854,65 @@ mod tests {
     #[test]
     fn test_delete_entry() {
         let mut node: [u8; 4096] = [0; 4096];
-        super::init_node(&mut node);
+        init_node(&mut node);
 
         // Note these are out of order
-        super::insert_entry(&mut node, "aardvark".as_bytes(), 1000);
-        super::insert_entry(&mut node, "apple".as_bytes(), 2000);
-        super::insert_entry(&mut node, "banana".as_bytes(), 3000);
-        super::insert_entry(&mut node, "zebra".as_bytes(), 4000);
+        insert_entry(&mut node, "aardvark".as_bytes(), 1000);
+        insert_entry(&mut node, "apple".as_bytes(), 2000);
+        insert_entry(&mut node, "banana".as_bytes(), 3000);
+        insert_entry(&mut node, "zebra".as_bytes(), 4000);
         sanity_check_node(&node);
-        assert_eq!(super::get_num_entries(&node), 4);
+        assert_eq!(get_num_entries(&node), 4);
 
         // Remove from middle (apple)
-        super::delete_entry(&mut node, 1);
-        assert_eq!(super::get_num_entries(&node), 3);
+        delete_entry(&mut node, 1);
+        assert_eq!(get_num_entries(&node), 3);
         sanity_check_node(&node);
 
-        assert_eq!(super::get_entry_key(&node, 0), "aardvark".as_bytes());
-        assert_eq!(super::get_entry_value(&node, 0), 1000);
-        assert_eq!(super::get_entry_key(&node, 1), "banana".as_bytes());
-        assert_eq!(super::get_entry_value(&node, 1), 3000);
-        assert_eq!(super::get_entry_key(&node, 2), "zebra".as_bytes());
-        assert_eq!(super::get_entry_value(&node, 2), 4000);
+        assert_eq!(get_entry_key(&node, 0), "aardvark".as_bytes());
+        assert_eq!(get_entry_value(&node, 0), 1000);
+        assert_eq!(get_entry_key(&node, 1), "banana".as_bytes());
+        assert_eq!(get_entry_value(&node, 1), 3000);
+        assert_eq!(get_entry_key(&node, 2), "zebra".as_bytes());
+        assert_eq!(get_entry_value(&node, 2), 4000);
 
         // Remove first entry (aardvark)
-        super::delete_entry(&mut node, 0);
-        assert_eq!(super::get_num_entries(&node), 2);
+        delete_entry(&mut node, 0);
+        assert_eq!(get_num_entries(&node), 2);
         sanity_check_node(&node);
-        assert_eq!(super::get_entry_key(&node, 0), "banana".as_bytes());
-        assert_eq!(super::get_entry_value(&node, 0), 3000);
-        assert_eq!(super::get_entry_key(&node, 1), "zebra".as_bytes());
-        assert_eq!(super::get_entry_value(&node, 1), 4000);
+        assert_eq!(get_entry_key(&node, 0), "banana".as_bytes());
+        assert_eq!(get_entry_value(&node, 0), 3000);
+        assert_eq!(get_entry_key(&node, 1), "zebra".as_bytes());
+        assert_eq!(get_entry_value(&node, 1), 4000);
 
         // Remove last entry (zebra)
-        super::delete_entry(&mut node, 1);
-        assert_eq!(super::get_num_entries(&node), 1);
+        delete_entry(&mut node, 1);
+        assert_eq!(get_num_entries(&node), 1);
         sanity_check_node(&node);
-        assert_eq!(super::get_entry_key(&node, 0), "banana".as_bytes());
-        assert_eq!(super::get_entry_value(&node, 0), 3000);
+        assert_eq!(get_entry_key(&node, 0), "banana".as_bytes());
+        assert_eq!(get_entry_value(&node, 0), 3000);
 
         // Remove only remaining entry
-        super::delete_entry(&mut node, 0);
+        delete_entry(&mut node, 0);
         sanity_check_node(&node);
-        assert_eq!(super::get_num_entries(&node), 0);
+        assert_eq!(get_num_entries(&node), 0);
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic = "delete_entry: invalid index"]
     fn test_delete_empty() {
         let mut node: [u8; 4096] = [0; 4096];
-        super::init_node(&mut node);
-        super::delete_entry(&mut node, 0);
+        init_node(&mut node);
+        delete_entry(&mut node, 0);
     }
 
     #[test]
     fn test_leaf_flag() {
         let mut node: [u8; 4096] = [0; 4096];
-        super::init_node(&mut node);
-        assert!(super::is_leaf(&node));
+        init_node(&mut node);
+        assert!(is_leaf(&node));
         node[0] = 0;
-        assert!(!super::is_leaf(&node));
+        assert!(!is_leaf(&node));
     }
 
     fn prand_order(n: usize) -> Vec<usize> {
@@ -941,11 +939,11 @@ mod tests {
         let root_page = allocator.alloc();
         {
             let mut node = page_cache.lock_page_mut(FilePageId(root_page));
-            super::init_node(&mut node);
+            init_node(&mut node);
         }
 
         for i in prand_order(num_entries) {
-            super::btree_insert(root_page, &gen_key_for_index(i), i as u64,
+            btree_insert(root_page, &gen_key_for_index(i), i as u64,
                 &page_cache, &mut allocator);
         }
 
@@ -956,7 +954,7 @@ mod tests {
     fn test_valid_btree_create() {
         const NUM_ENTRIES: usize = 120;
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
-        let mut cursor = super::btree_iterate(root_page, false, &page_cache);
+        let mut cursor = btree_iterate(root_page, false, &page_cache);
         for i in 0..NUM_ENTRIES {
             let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
@@ -969,7 +967,7 @@ mod tests {
         const NUM_ENTRIES: usize = 120;
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
-        let mut cursor = super::btree_iterate(root_page, true, &page_cache);
+        let mut cursor = btree_iterate(root_page, true, &page_cache);
         for i in (0..NUM_ENTRIES).rev() {
             let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
@@ -985,7 +983,7 @@ mod tests {
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
         const START_KEY_IDX: usize = 55;
-        let mut cursor = super::btree_find(root_page, &gen_key_for_index(START_KEY_IDX), false, &page_cache);
+        let mut cursor = btree_find(root_page, &gen_key_for_index(START_KEY_IDX), false, &page_cache);
         for i in START_KEY_IDX..START_KEY_IDX + 10 {
             let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
             assert_eq!(key.as_slice(), &gen_key_for_index(i));
@@ -999,8 +997,7 @@ mod tests {
         const NUM_ENTRIES: usize = 120;
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
-        const START_KEY_IDX: usize = 55;
-        let mut cursor = super::btree_find(root_page, &[0u8], false, &page_cache);
+        let mut cursor = btree_find(root_page, &[0u8], false, &page_cache);
         let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
         assert_eq!(key.as_slice(), &gen_key_for_index(0));
         assert_eq!(val, 0u64);
@@ -1016,24 +1013,24 @@ mod tests {
 
         {
             let mut node = page_cache.lock_page_mut(FilePageId(root_page));
-            super::init_node(&mut node);
+            init_node(&mut node);
         }
 
-        super::btree_insert(root_page, "aardvark".as_bytes(), 1000, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "aardvark".as_bytes(), 1001, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "apple".as_bytes(), 2000, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "apple".as_bytes(), 2001, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "apple".as_bytes(), 2002, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "apple".as_bytes(), 2003, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "apple".as_bytes(), 2004, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "apple".as_bytes(), 2005, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "banana".as_bytes(), 3000, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "banana".as_bytes(), 3001, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "zebra".as_bytes(), 4000, &page_cache, &mut allocator);
+        btree_insert(root_page, "aardvark".as_bytes(), 1000, &page_cache, &mut allocator);
+        btree_insert(root_page, "aardvark".as_bytes(), 1001, &page_cache, &mut allocator);
+        btree_insert(root_page, "apple".as_bytes(), 2000, &page_cache, &mut allocator);
+        btree_insert(root_page, "apple".as_bytes(), 2001, &page_cache, &mut allocator);
+        btree_insert(root_page, "apple".as_bytes(), 2002, &page_cache, &mut allocator);
+        btree_insert(root_page, "apple".as_bytes(), 2003, &page_cache, &mut allocator);
+        btree_insert(root_page, "apple".as_bytes(), 2004, &page_cache, &mut allocator);
+        btree_insert(root_page, "apple".as_bytes(), 2005, &page_cache, &mut allocator);
+        btree_insert(root_page, "banana".as_bytes(), 3000, &page_cache, &mut allocator);
+        btree_insert(root_page, "banana".as_bytes(), 3001, &page_cache, &mut allocator);
+        btree_insert(root_page, "zebra".as_bytes(), 4000, &page_cache, &mut allocator);
 
-        super::btree_delete(root_page, "apple".as_bytes(), 2001, &page_cache);
+        btree_delete(root_page, "apple".as_bytes(), 2001, &page_cache);
 
-        let mut cursor = super::btree_iterate(root_page, true, &page_cache);
+        let mut cursor = btree_iterate(root_page, true, &page_cache);
         for _ in 0..10 {
             let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
             assert!(key.as_slice() != "apple".as_bytes() || val != 2001);
@@ -1052,16 +1049,16 @@ mod tests {
 
         {
             let mut node = page_cache.lock_page_mut(FilePageId(root_page));
-            super::init_node(&mut node);
+            init_node(&mut node);
         }
 
-        super::btree_insert(root_page, "aardvark".as_bytes(), 1000, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "apple".as_bytes(), 2000, &page_cache, &mut allocator);
-        super::btree_insert(root_page, "banana".as_bytes(), 3000, &page_cache, &mut allocator);
+        btree_insert(root_page, "aardvark".as_bytes(), 1000, &page_cache, &mut allocator);
+        btree_insert(root_page, "apple".as_bytes(), 2000, &page_cache, &mut allocator);
+        btree_insert(root_page, "banana".as_bytes(), 3000, &page_cache, &mut allocator);
 
-        super::btree_delete(root_page, "apple".as_bytes(), 2001, &page_cache);
+        btree_delete(root_page, "apple".as_bytes(), 2001, &page_cache);
 
-        let mut cursor = super::btree_iterate(root_page, false, &page_cache);
+        let mut cursor = btree_iterate(root_page, false, &page_cache);
         let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
         assert_eq!(key.as_slice(), "aardvark".as_bytes());
         assert_eq!(val, 1000);
@@ -1078,6 +1075,6 @@ mod tests {
     #[test]
     fn test_print_btree() {
         let (page_cache, _alloc, root_page) = build_btree(50);
-        let mut cursor = super::print_btree(root_page, &page_cache);
+        print_btree(root_page, &page_cache);
     }
 }

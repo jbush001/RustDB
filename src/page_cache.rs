@@ -284,6 +284,7 @@ mod tests {
     use std::rc::Rc;
     use std::cell::RefCell;
     use std::any::Any;
+    use super::*;
 
     #[derive(Default)]
     struct MockIO {
@@ -306,7 +307,7 @@ mod tests {
         }
     }
 
-    impl super::PersistentStore for MockIO {
+    impl PersistentStore for MockIO {
         fn read(&mut self, offset: u64, slice: &mut [u8]) {
             self.read_called = true;
             self.read_address = offset;
@@ -330,84 +331,168 @@ mod tests {
         }
     }
 
-    fn with_mock<F>(io: &Rc<RefCell<dyn super::PersistentStore>>, f: F)
+    fn with_mock<F>(io: &Rc<RefCell<dyn PersistentStore>>, f: F)
     where F: FnOnce(&MockIO) {
         let borrowed = io.borrow();
         f(borrowed.as_any().downcast_ref::<MockIO>().unwrap());
     }
 
-    fn with_mock_mut<F>(io: &Rc<RefCell<dyn super::PersistentStore>>, f: F)
+    fn with_mock_mut<F>(io: &Rc<RefCell<dyn PersistentStore>>, f: F)
     where F: FnOnce(&mut MockIO) {
         let mut borrowed = io.borrow_mut();
         f(borrowed.as_any_mut().downcast_mut::<MockIO>().unwrap());
     }
 
-    fn sanity_check_lru(lru: &super::LRUEvictionPolicy) {
-        assert_eq!(lru.head.is_some(), lru.tail.is_some());
+    fn sanity_check_lru(lru: &LRUEvictionPolicy) {
+        // You can't have a valid head pointer with valid tail and vice versa
+        assert_eq!(lru.head.is_some(), lru.tail.is_some(), "Head/tail asymmetry");
         if lru.head.is_none() {
             return;
         }
 
-        assert_eq!(lru.next.len(), lru.prev.len());
+        assert_eq!(lru.next.len(), lru.prev.len(), "Array size mismatch");
+
+        // Forward traversal
         let mut node = lru.head;
         let mut forward_len: usize = 0;
-        for i in 0..lru.next.len() + 1 {
+        while let Some(_id) = node {
             forward_len += 1;
+            assert!(forward_len <= lru.next.len(), "Cycle in next pointers");
+
             if lru.next[node.unwrap().0 as usize].is_none() {
-                assert_eq!(node, lru.tail);
+                assert_eq!(node, lru.tail, "Forward traversal terminated early: not at tail");
                 break;
             } else {
                 node = lru.next[node.unwrap().0 as usize];
             }
         }
 
+        // Backward traversal
         let mut node = lru.tail;
         let mut reverse_len: usize = 0;
-        for i in 0..lru.next.len() + 1 {
+        while let Some(_id) = node {
             reverse_len += 1;
+            assert!(reverse_len <= lru.prev.len(), "Cycle in prev pointers");
+
             if lru.prev[node.unwrap().0 as usize].is_none() {
-                assert_eq!(node, lru.head);
+                assert_eq!(node, lru.head, "Backward traversal terminated early: not at head");
                 break;
             } else {
                 node = lru.prev[node.unwrap().0 as usize];
             }
         }
+    }
 
-        assert_eq!(forward_len, reverse_len);
+    // Test that our validation tests catch bad lists
+    #[test]
+    #[should_panic = "Head/tail asymmetry"]
+    fn test_head_tail_assym1() {
+        sanity_check_lru(&LRUEvictionPolicy {
+            next: vec![Some(CachePageId(1)), None],
+            prev: vec![None, Some(CachePageId(0))],
+            head: Some(CachePageId(0)),
+            tail: None
+        })
+    }
+
+    #[test]
+    #[should_panic = "Head/tail asymmetry"]
+    fn test_head_tail_assym2() {
+        sanity_check_lru(&LRUEvictionPolicy {
+            next: vec![Some(CachePageId(1)), None],
+            prev: vec![None, Some(CachePageId(0))],
+            head: None,
+            tail: Some(CachePageId(0))
+        })
+    }
+
+    #[test]
+    #[should_panic = "Array size mismatch"]
+    fn test_array_size_mismatch() {
+        sanity_check_lru(&LRUEvictionPolicy {
+            next: vec![Some(CachePageId(1)), None],
+            prev: vec![Some(CachePageId(0))],
+            head: Some(CachePageId(1)),
+            tail: Some(CachePageId(0))
+        })
+    }
+
+    #[test]
+    #[should_panic = "Cycle in next pointers"]
+    fn test_next_cycle() {
+        sanity_check_lru(&LRUEvictionPolicy {
+            next: vec![Some(CachePageId(1)), Some(CachePageId(1))],
+            prev: vec![None, Some(CachePageId(0))],
+            head: Some(CachePageId(0)),
+            tail: Some(CachePageId(1))
+        })
+    }
+
+    #[test]
+    #[should_panic = "Cycle in prev pointers"]
+    fn test_prev_cycle() {
+        sanity_check_lru(&LRUEvictionPolicy {
+            next: vec![Some(CachePageId(1)), None],
+            prev: vec![Some(CachePageId(0)), Some(CachePageId(0))],
+            head: Some(CachePageId(0)),
+            tail: Some(CachePageId(1))
+        })
+    }
+
+    #[test]
+    #[should_panic = "Forward traversal terminated early: not at tail"]
+    fn test_array_tail_bad() {
+        sanity_check_lru(&LRUEvictionPolicy {
+            next: vec![Some(CachePageId(1)), None, None],
+            prev: vec![None, Some(CachePageId(0)), Some(CachePageId(1))],
+            head: Some(CachePageId(0)),
+            tail: Some(CachePageId(2))
+        })
+    }
+
+    #[test]
+    #[should_panic = "Backward traversal terminated early: not at head"]
+    fn test_array_head_bad() {
+        sanity_check_lru(&LRUEvictionPolicy {
+            next: vec![Some(CachePageId(1)), Some(CachePageId(2)), None],
+            prev: vec![None, None, Some(CachePageId(1))],
+            head: Some(CachePageId(0)),
+            tail: Some(CachePageId(2))
+        })
     }
 
     // Eviction policy tests
     #[test]
     fn test_ep_evict_empty() {
-        let mut policy = super::LRUEvictionPolicy::new(10);
+        let mut policy = LRUEvictionPolicy::new(10);
         sanity_check_lru(&policy);
         assert_eq!(policy.evict(), None);
     }
 
     #[test]
     fn test_ep_evict_one() {
-        let mut policy = super::LRUEvictionPolicy::new(10);
-        policy.insert(super::CachePageId(1));
+        let mut policy = LRUEvictionPolicy::new(10);
+        policy.insert(CachePageId(1));
         sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), Some(super::CachePageId(1)));
+        assert_eq!(policy.evict(), Some(CachePageId(1)));
         assert_eq!(policy.evict(), None);
     }
 
     #[test]
     fn test_ep_evict_many() {
-        let mut policy = super::LRUEvictionPolicy::new(10);
-        policy.insert(super::CachePageId(1));
-        policy.insert(super::CachePageId(2));
-        policy.insert(super::CachePageId(3));
-        policy.insert(super::CachePageId(4));
+        let mut policy = LRUEvictionPolicy::new(10);
+        policy.insert(CachePageId(1));
+        policy.insert(CachePageId(2));
+        policy.insert(CachePageId(3));
+        policy.insert(CachePageId(4));
         sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), Some(super::CachePageId(1)));
+        assert_eq!(policy.evict(), Some(CachePageId(1)));
         sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), Some(super::CachePageId(2)));
+        assert_eq!(policy.evict(), Some(CachePageId(2)));
         sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), Some(super::CachePageId(3)));
+        assert_eq!(policy.evict(), Some(CachePageId(3)));
         sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), Some(super::CachePageId(4)));
+        assert_eq!(policy.evict(), Some(CachePageId(4)));
         sanity_check_lru(&policy);
         assert_eq!(policy.evict(), None);
         sanity_check_lru(&policy);
@@ -415,125 +500,111 @@ mod tests {
 
     #[test]
     fn test_ep_insert_remove() {
-        let mut policy = super::LRUEvictionPolicy::new(10);
-        policy.insert(super::CachePageId(1));
-        policy.insert(super::CachePageId(2));
-        policy.insert(super::CachePageId(3));
-        policy.remove(super::CachePageId(2));
+        let mut policy = LRUEvictionPolicy::new(10);
+        policy.insert(CachePageId(1));
+        policy.insert(CachePageId(2));
+        policy.insert(CachePageId(3));
+        policy.remove(CachePageId(2));
         sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), Some(super::CachePageId(1)));
-        assert_eq!(policy.evict(), Some(super::CachePageId(3)));
+        assert_eq!(policy.evict(), Some(CachePageId(1)));
+        assert_eq!(policy.evict(), Some(CachePageId(3)));
         sanity_check_lru(&policy);
     }
 
     // Regression test
     #[test]
     fn test_ep_remove_head() {
-        let mut policy = super::LRUEvictionPolicy::new(10);
-        policy.insert(super::CachePageId(1));
+        let mut policy = LRUEvictionPolicy::new(10);
+        policy.insert(CachePageId(1));
         sanity_check_lru(&policy);
-        policy.insert(super::CachePageId(2));
+        policy.insert(CachePageId(2));
         sanity_check_lru(&policy);
-        policy.remove(super::CachePageId(2));
+        policy.remove(CachePageId(2));
         sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), Some(super::CachePageId(1)));
+        assert_eq!(policy.evict(), Some(CachePageId(1)));
         sanity_check_lru(&policy);
         assert_eq!(policy.evict(), None);
         sanity_check_lru(&policy);
     }
 
+    fn setup_cache(capacity: usize) -> (Rc<RefCell<dyn PersistentStore>>, PageCache) {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
+        let page_cache = PageCache::new(capacity, Rc::clone(&mock_io));
+        (mock_io, page_cache)
+    }
+
     // Page cache tests
     #[test]
-    fn test_pc_lock_unlock() {
-        let mock_io: Rc<RefCell<dyn super::PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
-        let page_cache = super::PageCache::new(5, Rc::clone(&mock_io));
+    fn test_pc_lock_two_pages() {
+        let (mock_io, page_cache) = setup_cache(5);
 
-        // Read a page
+        // Read the first page
         with_mock_mut(&mock_io, |m| {
             m.reset();
             m.read_data = 3;
         });
 
         {
-            let guard = page_cache.lock_page(super::FilePageId(3));
+            let guard = page_cache.lock_page(FilePageId(3));
             with_mock(&mock_io, |m| {
                 assert!(m.read_called);
                 assert_eq!(m.read_address, 0x3000);
             });
 
             assert_eq!((*guard)[0], 3);
-
-            // Read a different page
-            with_mock_mut(&mock_io, |m| {
-                m.reset();
-                m.read_data = 4;
-            });
         }
 
-        {
-            let guard = page_cache.lock_page(super::FilePageId(4));
-            with_mock(&mock_io, |m| {
-                assert!(m.read_called);
-                assert_eq!(m.read_address, 0x4000);
-            });
+        // Read a different page
+        with_mock_mut(&mock_io, |m| {
+            m.reset();
+            m.read_data = 4;
+        });
 
-            assert_eq!((*guard)[0], 4);
-        }
+        let guard = page_cache.lock_page(FilePageId(4));
+        with_mock(&mock_io, |m| {
+            assert!(m.read_called);
+            assert_eq!(m.read_address, 0x4000);
+        });
+
+        assert_eq!((*guard)[0], 4);
 
         // Now read the original page. It's cached, so it will not need to be re-read
         with_mock_mut(&mock_io, |m| m.reset());
         {
-            let guard = page_cache.lock_page(super::FilePageId(3));
+            let guard = page_cache.lock_page(FilePageId(3));
             with_mock(&mock_io, |m| {
                 assert!(!m.read_called);
             });
 
             assert_eq!((*guard)[0], 3);
         }
+    }
 
-        // Now read other pages until we evict the oldest page, which should be 4
-        with_mock_mut(&mock_io, |m| {
-            m.reset();
-        });
-        page_cache.lock_page(super::FilePageId(5));
+    #[test]
+    fn test_pc_evict() {
+        let (mock_io, page_cache) = setup_cache(5);
 
+        page_cache.lock_page(FilePageId(3));
+        page_cache.lock_page(FilePageId(4));
+        page_cache.lock_page(FilePageId(5));
+        page_cache.lock_page(FilePageId(6));
+        page_cache.lock_page(FilePageId(7));
+
+        // This will evict page 3...
+        page_cache.lock_page(FilePageId(8));
+
+        // ...let's prove it by relocking page 3
+        with_mock_mut(&mock_io, |m| m.reset());
+        page_cache.lock_page(FilePageId(3));
         with_mock(&mock_io, |m| {
             assert!(m.read_called);
-            assert_eq!(m.read_address, 0x5000);
+            assert_eq!(m.read_address, 0x3000);
         });
 
+        // Ensure page 5 is still in the cache and didn't get
+        // evicted
         with_mock_mut(&mock_io, |m| m.reset());
-        page_cache.lock_page(super::FilePageId(6));
-        with_mock(&mock_io, |m| {
-            assert_eq!(m.read_address, 0x6000);
-        });
-
-        with_mock_mut(&mock_io, |m| m.reset());
-        page_cache.lock_page(super::FilePageId(7));
-        with_mock(&mock_io, |m| {
-            assert!(m.read_called);
-            assert_eq!(m.read_address, 0x7000);
-        });
-
-        // This will evict page 4...
-        with_mock_mut(&mock_io, |m| m.reset());
-        page_cache.lock_page(super::FilePageId(8));
-        with_mock(&mock_io, |m| {
-            assert!(m.read_called);
-            assert_eq!(m.read_address, 0x8000);
-        });
-
-        // ...let's prove it by reading back
-        with_mock_mut(&mock_io, |m| m.reset());
-        page_cache.lock_page(super::FilePageId(4));
-        with_mock(&mock_io, |m| {
-            assert!(m.read_called);
-            assert_eq!(m.read_address, 0x4000);
-        });
-
-        // But ensure that page 5 is still okay
-        with_mock_mut(&mock_io, |m| m.reset());
-        page_cache.lock_page(super::FilePageId(5));
+        page_cache.lock_page(FilePageId(5));
         with_mock(&mock_io, |m| {
             assert!(!m.read_called);
         });
@@ -541,14 +612,13 @@ mod tests {
 
     #[test]
     fn test_pc_lock_write_dirty() {
-        let mock_io: Rc<RefCell<dyn super::PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
-        let page_cache = super::PageCache::new(5, Rc::clone(&mock_io));
+        let (mock_io, page_cache) = setup_cache(5);
 
         const WRITE_VAL: u8 = 0x55;
 
         // Read a page, set the wriable bit
         {
-            let mut guard = page_cache.lock_page_mut(super::FilePageId(3));
+            let mut guard = page_cache.lock_page_mut(FilePageId(3));
             (*guard)[0] = WRITE_VAL;
         }
 
@@ -563,15 +633,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic = "cache full!"]
     fn test_cache_full() {
-        let mock_io: Rc<RefCell<dyn super::PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
-        let page_cache = super::PageCache::new(5, Rc::clone(&mock_io));
-        let _guard1 = page_cache.lock_page_mut(super::FilePageId(0));
-        let _guard2 = page_cache.lock_page_mut(super::FilePageId(1));
-        let _guard3 = page_cache.lock_page_mut(super::FilePageId(2));
-        let _guard4 = page_cache.lock_page_mut(super::FilePageId(3));
-        let _guard5 = page_cache.lock_page_mut(super::FilePageId(4));
-        let _guard6 = page_cache.lock_page_mut(super::FilePageId(5));
+        let (_mock_io, page_cache) = setup_cache(5);
+
+        let _guard1 = page_cache.lock_page_mut(FilePageId(0));
+        let _guard2 = page_cache.lock_page_mut(FilePageId(1));
+        let _guard3 = page_cache.lock_page_mut(FilePageId(2));
+        let _guard4 = page_cache.lock_page_mut(FilePageId(3));
+        let _guard5 = page_cache.lock_page_mut(FilePageId(4));
+        let _guard6 = page_cache.lock_page_mut(FilePageId(5));
     }
 }

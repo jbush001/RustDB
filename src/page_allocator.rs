@@ -92,6 +92,7 @@ mod tests {
     use crate::page_cache::*;
     use std::any::Any;
     use more_asserts::{assert_gt};
+    use super::*;
 
     #[derive(Default)]
     struct MockIO {
@@ -119,7 +120,7 @@ mod tests {
     fn test_page_allocator() {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
         let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
-        let mut allocator = super::PageAllocator::new(&mut page_cache);
+        let mut allocator = PageAllocator::new(&mut page_cache);
 
         // Allocate two frontier blocks
         let p0 = allocator.alloc();

@@ -79,11 +79,12 @@ mod tests {
     use tempfile::NamedTempFile;
     use std::fs;
     use crate::page_cache::*;
+    use super::*;
 
     #[test]
     fn test_read_write() {
         let file = NamedTempFile::new().unwrap();
-        let mut store = super::FileStore::open(file.path().to_str().unwrap()).unwrap();
+        let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
         store.write(0, &"abcdefghiklmnopqrstuvwxyz0123456789".as_bytes());
 
@@ -100,7 +101,7 @@ mod tests {
     #[test]
     fn test_read_past_end() {
         let file = NamedTempFile::new().unwrap();
-        let mut store = super::FileStore::open(file.path().to_str().unwrap()).unwrap();
+        let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
         store.write(0, &[1u8, 2, 3, 4, 5, 6, 7, 8, 9]);
 
@@ -112,7 +113,7 @@ mod tests {
     #[test]
     fn test_read_completely_past_end() {
         let file = NamedTempFile::new().unwrap();
-        let mut store = super::FileStore::open(file.path().to_str().unwrap()).unwrap();
+        let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
         let mut buf: [u8; 10] = [0xff; 10];
         store.read(100, &mut buf);
@@ -127,18 +128,18 @@ mod tests {
     #[test]
     fn test_as_any() {
         let file = NamedTempFile::new().unwrap();
-        let mut store = super::FileStore::open(file.path().to_str().unwrap()).unwrap();
+        let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
         let any = store.as_any();
-        assert!(any.downcast_ref::<super::FileStore>().is_some());
+        assert!(any.downcast_ref::<FileStore>().is_some());
 
         let any = store.as_any_mut();
-        assert!(any.downcast_mut::<super::FileStore>().is_some());
+        assert!(any.downcast_mut::<FileStore>().is_some());
     }
 
     #[test]
     fn test_open_failure() {
         // A path whose parent directory doesn't exist
-        let result = super::FileStore::open("/nonexistent/dir/test.db");
+        let result = FileStore::open("/nonexistent/dir/test.db");
         assert!(result.is_err());
     }
 }
