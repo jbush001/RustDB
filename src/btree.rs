@@ -42,36 +42,29 @@ const FLAG_LEAF: u16 = 1;
 const INVALID_FPID: u64 = 0;
 
 struct BTreeCursor {
-    current_page_fpid: u64,
+    current_node_fpid: u64,
     current_index: usize,
     reverse: bool,
     page_cache: PageCache
 }
 
-impl BTreeCursor {
-    fn new(start_fpid: u64, start_index: usize, reverse: bool, page_cache: &PageCache) -> Self {
-        BTreeCursor {
-            current_page_fpid: start_fpid,
-            current_index: start_index,
-            reverse,
-            page_cache: page_cache.clone()
-        }
-    }
+impl Iterator for BTreeCursor {
+    type Item = (Vec<u8>, u64);
 
-    fn next(&mut self) -> Option<(Vec<u8>, u64)> {
-        if self.current_page_fpid == INVALID_FPID {
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_node_fpid == INVALID_FPID {
             return None
         }
 
-        let page = self.page_cache.lock_page(FilePageId(self.current_page_fpid));
+        let page = self.page_cache.lock_page(FilePageId(self.current_node_fpid));
         let entry = (get_entry_key(&page, self.current_index).to_vec(),
             get_entry_value(&page, self.current_index));
         let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
         if self.reverse {
             if self.current_index == 0 {
-                self.current_page_fpid = header.prev_sib;
-                if self.current_page_fpid != INVALID_FPID {
-                    let page = self.page_cache.lock_page(FilePageId(self.current_page_fpid));
+                self.current_node_fpid = header.prev_sib;
+                if self.current_node_fpid != INVALID_FPID {
+                    let page = self.page_cache.lock_page(FilePageId(self.current_node_fpid));
                     self.current_index = record_array::get_num_entries(&page) - 1;
                 }
             } else {
@@ -79,7 +72,7 @@ impl BTreeCursor {
             }
         } else {
             if self.current_index == record_array::get_num_entries(&page) - 1 {
-                self.current_page_fpid = header.next_sib;
+                self.current_node_fpid = header.next_sib;
                 self.current_index = 0;
             } else {
                 self.current_index += 1;
@@ -94,16 +87,21 @@ fn btree_iterate(root_node_fpid: u64, reverse: bool, page_cache: &PageCache) -> 
     let mut current_node_fpid = root_node_fpid;
     loop {
         let page = page_cache.lock_page_mut(FilePageId(current_node_fpid));
-        let index = if reverse { record_array::get_num_entries(&page) - 1 } else { 0 };
+        let current_index = if reverse { record_array::get_num_entries(&page) - 1 } else { 0 };
         if is_leaf(&page) {
-            return BTreeCursor::new(current_node_fpid, index, reverse, page_cache);
+            return BTreeCursor {
+                current_node_fpid,
+                current_index,
+                reverse,
+                page_cache: page_cache.clone()
+            }
         }
 
-        if index == 0 {
+        if current_index == 0 {
             let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
             current_node_fpid = header.left_child;
         } else {
-            current_node_fpid = get_entry_value(&page, index);
+            current_node_fpid = get_entry_value(&page, current_index);
         }
     }
 }
@@ -116,11 +114,20 @@ fn btree_find(root_node_fpid: u64, key: &[u8], reverse: bool, page_cache: &PageC
         if is_leaf(&page) {
             if (reverse && index == 0) || (index == record_array::get_num_entries(&page)) {
                 // Nothing to fetch, return dummy cursor
-                return BTreeCursor::new(INVALID_FPID, 0, false, page_cache);
+                return BTreeCursor {
+                    current_node_fpid: INVALID_FPID,
+                    current_index: 0,
+                    reverse,
+                    page_cache: page_cache.clone()
+                }
             }
 
-            return BTreeCursor::new(current_node_fpid, if reverse { index - 1 } else { index },
-                reverse, page_cache);
+            return BTreeCursor {
+                current_node_fpid,
+                current_index: if reverse { index - 1 } else { index },
+                reverse,
+                page_cache: page_cache.clone()
+            }
         }
 
         if index == 0 {
@@ -248,7 +255,7 @@ fn btree_delete(root_node_fpid: u64,
     let mut cursor = btree_find(root_node_fpid, key, false, page_cache);
     loop {
         // Need to save these because cursor will post-update
-        let page_fpid = cursor.current_page_fpid;
+        let page_fpid = cursor.current_node_fpid;
         let index = cursor.current_index;
         let next = cursor.next();
         if next.is_none() {
@@ -676,11 +683,11 @@ mod tests {
     fn test_valid_btree_create() {
         const NUM_ENTRIES: usize = 127;
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
-        let mut cursor = btree_iterate(root_page, false, &page_cache);
-        for i in 0..NUM_ENTRIES {
-            let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
+        let mut i = 0;
+        for (key, val) in btree_iterate(root_page, false, &page_cache) {
             assert_eq!(key.as_slice(), gen_key_for_index(i));
             assert_eq!(val, i as u64);
+            i += 1;
         }
     }
 
