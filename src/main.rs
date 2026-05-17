@@ -20,6 +20,7 @@ mod util;
 mod page_allocator;
 mod file_store;
 mod record_array;
+mod mocks;
 
 use std::rc::Rc;
 use std::cell::RefCell;

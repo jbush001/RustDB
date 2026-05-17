@@ -90,35 +90,13 @@ mod tests {
     use std::rc::Rc;
     use std::cell::RefCell;
     use crate::page_cache::*;
-    use std::any::Any;
     use more_asserts::{assert_gt};
+    use crate::mocks::{MockPersistentStore};
     use super::*;
-
-    #[derive(Default)]
-    struct MockIO {
-    }
-
-    impl PersistentStore for MockIO {
-        fn read(&mut self, _offset: u64, slice: &mut [u8]) {
-            slice.fill(0);
-        }
-
-        fn write(&mut self, _offset: u64, _slice: &[u8]) {
-            // This shouldn't be called
-        }
-
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn as_any_mut(&mut self) -> &mut dyn Any {
-            self
-        }
-    }
 
     #[test]
     fn test_page_allocator() {
-        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
+        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
         let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
         let mut allocator = PageAllocator::new(&mut page_cache);
 

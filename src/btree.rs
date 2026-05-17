@@ -41,16 +41,16 @@ const FLAG_LEAF: u16 = 1;
 
 const INVALID_FPID: u64 = 0;
 
-struct Cursor {
+struct BTreeCursor {
     current_page_fpid: u64,
     current_index: usize,
     reverse: bool,
     page_cache: PageCache
 }
 
-impl Cursor {
+impl BTreeCursor {
     fn new(start_fpid: u64, start_index: usize, reverse: bool, page_cache: &PageCache) -> Self {
-        Cursor {
+        BTreeCursor {
             current_page_fpid: start_fpid,
             current_index: start_index,
             reverse,
@@ -90,13 +90,13 @@ impl Cursor {
     }
 }
 
-fn btree_iterate(root_node_fpid: u64, reverse: bool, page_cache: &PageCache) -> Cursor {
+fn btree_iterate(root_node_fpid: u64, reverse: bool, page_cache: &PageCache) -> BTreeCursor {
     let mut current_node_fpid = root_node_fpid;
     loop {
         let page = page_cache.lock_page_mut(FilePageId(current_node_fpid));
         let index = if reverse { record_array::get_num_entries(&page) - 1 } else { 0 };
         if is_leaf(&page) {
-            return Cursor::new(current_node_fpid, index, reverse, page_cache);
+            return BTreeCursor::new(current_node_fpid, index, reverse, page_cache);
         }
 
         if index == 0 {
@@ -108,13 +108,18 @@ fn btree_iterate(root_node_fpid: u64, reverse: bool, page_cache: &PageCache) -> 
     }
 }
 
-fn btree_find(root_node_fpid: u64, key: &[u8], reverse: bool, page_cache: &PageCache) -> Cursor {
+fn btree_find(root_node_fpid: u64, key: &[u8], reverse: bool, page_cache: &PageCache) -> BTreeCursor {
     let mut current_node_fpid = root_node_fpid;
     loop {
         let page = page_cache.lock_page_mut(FilePageId(current_node_fpid));
         let index = find_key(&page, key);
         if is_leaf(&page) {
-            return Cursor::new(current_node_fpid, if reverse { index - 1 } else { index },
+            if (reverse && index == 0) || (index == record_array::get_num_entries(&page)) {
+                // Nothing to fetch, return dummy cursor
+                return BTreeCursor::new(INVALID_FPID, 0, false, page_cache);
+            }
+
+            return BTreeCursor::new(current_node_fpid, if reverse { index - 1 } else { index },
                 reverse, page_cache);
         }
 
@@ -189,7 +194,7 @@ fn btree_insert(root_node_fpid: u64,
             }
 
             // The root will have a single entry. It't no longer a leaf.
-            init_node(&mut page);
+            init_btree_node(&mut page);
             set_not_leaf(&mut page);
             append_entry(&mut page, &split_key, new_page_fpid2);
             let page_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut page[0..record_array::HEADER_SIZE]);
@@ -296,7 +301,7 @@ fn print_node(node: &[u8]) {
 }
 
 // Create an empty node
-fn init_node(node: &mut [u8]) {
+fn init_btree_node(node: &mut [u8]) {
     record_array::init_array(node);
     let header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut node[0..record_array::HEADER_SIZE]);
     header.flags |= FLAG_LEAF;
@@ -376,8 +381,8 @@ fn append_entry(node: &mut [u8], key: &[u8], value: u64) -> usize {
 // NOTE: you must set the right_child in the returned out1 to the fpid of out2
 // (we don't know it here)
 fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
-    init_node(out1);
-    init_node(out2);
+    init_btree_node(out1);
+    init_btree_node(out2);
 
     // Copy out entries from the orig into out1 until we have just over half.
     // then continue copying into out2.
@@ -426,47 +431,8 @@ mod tests {
     use std::rc::Rc;
     use std::cell::RefCell;
     use crate::page_cache::*;
-    use std::any::Any;
-    use std::collections::HashSet;
+    use crate::mocks::{MockPersistentStore};
     use super::*;
-
-    #[derive(Default)]
-    struct MockIO {
-        loaded_pages: HashSet<u64>
-    }
-
-    impl MockIO {
-        fn default() -> Self {
-            Self {
-                loaded_pages: HashSet::new()
-            }
-        }
-    }
-
-    impl PersistentStore for MockIO {
-        fn read(&mut self, offset: u64, slice: &mut [u8]) {
-            if self.loaded_pages.contains(&offset) {
-                // This indicates the page cache evicted a page and is trying to
-                // reload it. Since we're not testing page cache here, we should
-                // just make it large enough that it doesn't need to evict.
-                panic!("reloaded pages: make PageCache larger");
-            }
-
-            self.loaded_pages.insert(offset);
-            slice.fill(0);
-        }
-
-        fn write(&mut self, _offset: u64, _slice: &[u8]) {
-        }
-
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn as_any_mut(&mut self) -> &mut dyn Any {
-            self
-        }
-    }
 
     fn sanity_check_node(node: &[u8]) {
         // Ensure the keys are in order
@@ -479,18 +445,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic = "reloaded pages: make PageCache larger"]
-    fn test_persistent_store_reread() {
-        let mut mock_io = MockIO::default();
-        let mut temp: [u8; 4096] = [0; 4096];
-        mock_io.read(0, &mut temp);
-        mock_io.read(0, &mut temp);
-    }
-
-    #[test]
     fn test_get_key_val() {
         let mut node: [u8; 4096] = [0; 4096];
-        init_node(&mut node);
+        init_btree_node(&mut node);
 
         append_entry(&mut node, "foobar".as_bytes(), 0x12345678abcdef);
         append_entry(&mut node, "zzzz".as_bytes(), 0xfedbca87654321);
@@ -509,7 +466,7 @@ mod tests {
     #[test]
     fn test_find() {
         let mut node: [u8; 4096] = [0; 4096];
-        init_node(&mut node);
+        init_btree_node(&mut node);
 
         append_entry(&mut node, "abacus".as_bytes(), 0);
         append_entry(&mut node, "banana".as_bytes(), 0);
@@ -528,7 +485,7 @@ mod tests {
     #[test]
     fn test_find_key_empty() {
         let mut node: [u8; 4096] = [0; 4096];
-        init_node(&mut node);
+        init_btree_node(&mut node);
 
         assert_eq!(find_key(&node, "foo".as_bytes()), 0);
     }
@@ -538,7 +495,7 @@ mod tests {
     #[test]
     fn test_entry_size() {
         let mut node: [u8; 4096] = [0; 4096];
-        init_node(&mut node);
+        init_btree_node(&mut node);
         let init_free_space = record_array::get_free_space(&node);
         let key1 = "foo".as_bytes();
         insert_entry(&mut node, key1, 0x1234);
@@ -557,7 +514,7 @@ mod tests {
     #[test]
     fn test_insert_entry() {
         let mut node: [u8; 4096] = [0; 4096];
-        init_node(&mut node);
+        init_btree_node(&mut node);
 
         // Note these are out of order
         insert_entry(&mut node, "aardvark".as_bytes(), 1000);
@@ -577,7 +534,7 @@ mod tests {
     #[should_panic = "Insufficient space to insert"]
     fn test_insert_entry_full() {
         let mut node: [u8; 4096] = [0; 4096];
-        init_node(&mut node);
+        init_btree_node(&mut node);
         for _ in 0..4096 {
             insert_entry(&mut node, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes(), 0);
         }
@@ -589,7 +546,7 @@ mod tests {
         let mut node2: [u8; 4096] = [0; 4096];
         let mut node3: [u8; 4096] = [0; 4096];
 
-        init_node(&mut node1);
+        init_btree_node(&mut node1);
         node1[0] = 0; // Clear leaf flag
         const PAGE1_ENTRIES: usize = 25;
         for i in 0..PAGE1_ENTRIES {
@@ -637,7 +594,7 @@ mod tests {
         let mut node2: [u8; 4096] = [0; 4096];
         let mut node3: [u8; 4096] = [0; 4096];
 
-        init_node(&mut node1);
+        init_btree_node(&mut node1);
         set_u16(&mut node1, 0, FLAG_LEAF);
 
         const PAGE1_ENTRIES: usize = 25;
@@ -673,7 +630,7 @@ mod tests {
     #[test]
     fn test_leaf_flag() {
         let mut node: [u8; 4096] = [0; 4096];
-        init_node(&mut node);
+        init_btree_node(&mut node);
         assert!(is_leaf(&node));
         node[0] = 0;
         assert!(!is_leaf(&node));
@@ -696,14 +653,15 @@ mod tests {
     }
 
     fn build_btree(num_entries: usize) -> (PageCache, PageAllocator, u64) {
-        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
+        let mock_io: Rc<RefCell<dyn PersistentStore>> =
+            Rc::new(RefCell::new(MockPersistentStore::default()));
         let mut page_cache = PageCache::new(50, Rc::clone(&mock_io));
         let mut allocator = PageAllocator::new(&mut page_cache);
 
         let root_page = allocator.alloc();
         {
             let mut node = page_cache.lock_page_mut(FilePageId(root_page));
-            init_node(&mut node);
+            init_btree_node(&mut node);
         }
 
         for i in prand_order(num_entries) {
@@ -716,7 +674,7 @@ mod tests {
 
     #[test]
     fn test_valid_btree_create() {
-        const NUM_ENTRIES: usize = 120;
+        const NUM_ENTRIES: usize = 127;
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
         let mut cursor = btree_iterate(root_page, false, &page_cache);
         for i in 0..NUM_ENTRIES {
@@ -728,7 +686,7 @@ mod tests {
 
     #[test]
     fn test_btree_backward_scan() {
-        const NUM_ENTRIES: usize = 120;
+        const NUM_ENTRIES: usize = 139;
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
         let mut cursor = btree_iterate(root_page, true, &page_cache);
@@ -743,13 +701,13 @@ mod tests {
 
     #[test]
     fn test_btree_find() {
-        const NUM_ENTRIES: usize = 120;
+        const NUM_ENTRIES: usize = 149;
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
         const START_KEY_IDX: usize = 55;
         let mut cursor = btree_find(root_page, &gen_key_for_index(START_KEY_IDX), false, &page_cache);
         for i in START_KEY_IDX..START_KEY_IDX + 10 {
-            let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
+            let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), &gen_key_for_index(i));
             assert_eq!(val, i as u64);
         }
@@ -758,7 +716,7 @@ mod tests {
     // Get the first node in the tree, which requires traversing the left child node.
     #[test]
     fn test_btree_find_begin() {
-        const NUM_ENTRIES: usize = 120;
+        const NUM_ENTRIES: usize = 151;
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
         let mut cursor = btree_find(root_page, &[0u8], false, &page_cache);
@@ -767,37 +725,43 @@ mod tests {
         assert_eq!(val, 0u64);
     }
 
+    // Key is before first key and going in reverse. Nothing to fetch.
+    #[test]
+    fn test_btree_reverse_find_begin() {
+        const NUM_ENTRIES: usize = 151;
+        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+
+        let mut cursor = btree_find(root_page, &[0u8], true, &page_cache);
+        assert_eq!(cursor.next(), None);
+    }
+
+    // Key is after last key and going forward. Nothing to fetch.
+    #[test]
+    fn test_btree_find_past_end() {
+        const NUM_ENTRIES: usize = 79;
+        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+
+        let mut cursor = btree_find(root_page, &[0xff; 255], false, &page_cache);
+        assert_eq!(cursor.next(), None);
+    }
+
     #[test]
     fn test_btree_delete() {
-        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
-        let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
-        let mut allocator = PageAllocator::new(&mut page_cache);
+        const NUM_ENTRIES: usize = 97;
+        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
-        let root_page = allocator.alloc();
+        const INDEX_TO_DELETE: usize = 37;
+        btree_delete(root_page, gen_key_for_index(INDEX_TO_DELETE).as_slice(), INDEX_TO_DELETE as u64, &page_cache);
 
-        {
-            let mut node = page_cache.lock_page_mut(FilePageId(root_page));
-            init_node(&mut node);
-        }
+        let mut cursor = btree_iterate(root_page, false, &page_cache);
+        for i in 0..NUM_ENTRIES {
+            if i == INDEX_TO_DELETE {
+                continue;
+            }
 
-        btree_insert(root_page, "aardvark".as_bytes(), 1000, &page_cache, &mut allocator);
-        btree_insert(root_page, "aardvark".as_bytes(), 1001, &page_cache, &mut allocator);
-        btree_insert(root_page, "apple".as_bytes(), 2000, &page_cache, &mut allocator);
-        btree_insert(root_page, "apple".as_bytes(), 2001, &page_cache, &mut allocator);
-        btree_insert(root_page, "apple".as_bytes(), 2002, &page_cache, &mut allocator);
-        btree_insert(root_page, "apple".as_bytes(), 2003, &page_cache, &mut allocator);
-        btree_insert(root_page, "apple".as_bytes(), 2004, &page_cache, &mut allocator);
-        btree_insert(root_page, "apple".as_bytes(), 2005, &page_cache, &mut allocator);
-        btree_insert(root_page, "banana".as_bytes(), 3000, &page_cache, &mut allocator);
-        btree_insert(root_page, "banana".as_bytes(), 3001, &page_cache, &mut allocator);
-        btree_insert(root_page, "zebra".as_bytes(), 4000, &page_cache, &mut allocator);
-
-        btree_delete(root_page, "apple".as_bytes(), 2001, &page_cache);
-
-        let mut cursor = btree_iterate(root_page, true, &page_cache);
-        for _ in 0..10 {
-            let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
-            assert!(key.as_slice() != "apple".as_bytes() || val != 2001);
+            let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
+            assert_eq!(key.as_slice(), gen_key_for_index(i));
+            assert_eq!(val, i as u64);
         }
 
         assert!(cursor.next().is_none());
@@ -805,34 +769,21 @@ mod tests {
 
     #[test]
     fn test_btree_delete_not_present() {
-        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
-        let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
-        let mut allocator = PageAllocator::new(&mut page_cache);
+        const NUM_ENTRIES: usize = 103;
+        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
-        let root_page = allocator.alloc();
+        // Key is bogus
+        btree_delete(root_page, &"yolo".as_bytes(), 11, &page_cache);
 
-        {
-            let mut node = page_cache.lock_page_mut(FilePageId(root_page));
-            init_node(&mut node);
-        }
-
-        btree_insert(root_page, "aardvark".as_bytes(), 1000, &page_cache, &mut allocator);
-        btree_insert(root_page, "apple".as_bytes(), 2000, &page_cache, &mut allocator);
-        btree_insert(root_page, "banana".as_bytes(), 3000, &page_cache, &mut allocator);
-
-        btree_delete(root_page, "apple".as_bytes(), 2001, &page_cache);
+        // Key is present, but value doesn't match
+        btree_delete(root_page, gen_key_for_index(10).as_slice(), 11, &page_cache);
 
         let mut cursor = btree_iterate(root_page, false, &page_cache);
-        let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
-        assert_eq!(key.as_slice(), "aardvark".as_bytes());
-        assert_eq!(val, 1000);
-        let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
-        assert_eq!(key.as_slice(), "apple".as_bytes());
-        assert_eq!(val, 2000);
-        let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
-        assert_eq!(key.as_slice(), "banana".as_bytes());
-        assert_eq!(val, 3000);
-        assert!(cursor.next().is_none());
+        for i in 0..NUM_ENTRIES {
+            let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
+            assert_eq!(key.as_slice(), gen_key_for_index(i));
+            assert_eq!(val, i as u64);
+        }
     }
 
     // Just ensures it doesn't crash...

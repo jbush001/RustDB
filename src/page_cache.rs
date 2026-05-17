@@ -287,7 +287,7 @@ mod tests {
     use super::*;
 
     #[derive(Default)]
-    struct MockIO {
+    struct MockIOChecker {
         read_called: bool,
         read_address: u64,
         read_data: u8,
@@ -296,7 +296,7 @@ mod tests {
         write_data: u8
     }
 
-    impl MockIO {
+    impl MockIOChecker {
         fn reset(&mut self) {
             self.read_called = false;
             self.read_address = 0;
@@ -307,7 +307,7 @@ mod tests {
         }
     }
 
-    impl PersistentStore for MockIO {
+    impl PersistentStore for MockIOChecker {
         fn read(&mut self, offset: u64, slice: &mut [u8]) {
             self.read_called = true;
             self.read_address = offset;
@@ -332,15 +332,15 @@ mod tests {
     }
 
     fn with_mock<F>(io: &Rc<RefCell<dyn PersistentStore>>, f: F)
-    where F: FnOnce(&MockIO) {
+    where F: FnOnce(&MockIOChecker) {
         let borrowed = io.borrow();
-        f(borrowed.as_any().downcast_ref::<MockIO>().unwrap());
+        f(borrowed.as_any().downcast_ref::<MockIOChecker>().unwrap());
     }
 
     fn with_mock_mut<F>(io: &Rc<RefCell<dyn PersistentStore>>, f: F)
-    where F: FnOnce(&mut MockIO) {
+    where F: FnOnce(&mut MockIOChecker) {
         let mut borrowed = io.borrow_mut();
-        f(borrowed.as_any_mut().downcast_mut::<MockIO>().unwrap());
+        f(borrowed.as_any_mut().downcast_mut::<MockIOChecker>().unwrap());
     }
 
     fn sanity_check_lru(lru: &LRUEvictionPolicy) {
@@ -528,7 +528,7 @@ mod tests {
     }
 
     fn setup_cache(capacity: usize) -> (Rc<RefCell<dyn PersistentStore>>, PageCache) {
-        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIO::default()));
+        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIOChecker::default()));
         let page_cache = PageCache::new(capacity, Rc::clone(&mock_io));
         (mock_io, page_cache)
     }
