@@ -142,4 +142,39 @@ mod tests {
         let result = FileStore::open("/nonexistent/dir/test.db");
         assert!(result.is_err());
     }
+
+    #[test]
+    #[should_panic]
+    fn test_read_failure() {
+        let file = NamedTempFile::new().unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/null").unwrap();
+        let mut store = FileStore {
+            file,
+            length: 0
+        };
+
+        let mut buf: [u8; 16] = [0; 16];
+        store.write(8, &buf);
+        store.read(8, &mut buf);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_write_failure() {
+        let file = NamedTempFile::new().unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(file.path().to_str().unwrap()).unwrap();
+        let mut store = FileStore {
+            file,
+            length: 0
+        };
+
+        let buf: [u8; 16] = [0; 16];
+        store.write(8, &buf);
+    }
 }
