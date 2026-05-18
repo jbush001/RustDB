@@ -43,7 +43,7 @@ const FLAG_LEAF: u16 = 1;
 
 const INVALID_FPID: u64 = 0;
 
-struct BTreeCursor {
+pub struct BTreeCursor {
     current_node_fpid: u64,
     current_index: usize,
     reverse: bool,
@@ -85,7 +85,7 @@ impl Iterator for BTreeCursor {
     }
 }
 
-fn btree_iterate(root_node_fpid: u64, reverse: bool, page_cache: &PageCache) -> BTreeCursor {
+pub fn btree_iterate(root_node_fpid: u64, reverse: bool, page_cache: &PageCache) -> BTreeCursor {
     let mut current_node_fpid = root_node_fpid;
     loop {
         let page = page_cache.lock_page_mut(FilePageId(current_node_fpid));
@@ -109,7 +109,7 @@ fn btree_iterate(root_node_fpid: u64, reverse: bool, page_cache: &PageCache) -> 
     }
 }
 
-fn btree_find(root_node_fpid: u64, key: &[u8], reverse: bool, page_cache: &PageCache) -> BTreeCursor {
+pub fn btree_find(root_node_fpid: u64, key: &[u8], reverse: bool, page_cache: &PageCache) -> BTreeCursor {
     let mut current_node_fpid = root_node_fpid;
     loop {
         let page = page_cache.lock_page_mut(FilePageId(current_node_fpid));
@@ -143,7 +143,7 @@ fn btree_find(root_node_fpid: u64, key: &[u8], reverse: bool, page_cache: &PageC
     }
 }
 
-fn btree_insert(root_node_fpid: u64,
+pub fn btree_insert(root_node_fpid: u64,
     key: &[u8],
     value: &[u8],
     page_cache: &PageCache,
@@ -321,7 +321,7 @@ fn print_node(node: &[u8]) {
 }
 
 // Create an empty node
-fn init_btree_node(node: &mut [u8]) {
+pub fn init_btree_node(node: &mut [u8]) {
     record_array::init_array(node);
     let header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut node[0..record_array::HEADER_SIZE]);
     header.flags |= FLAG_LEAF;

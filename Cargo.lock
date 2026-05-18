@@ -9,6 +9,7 @@ dependencies = [
  "bytemuck",
  "cargo-llvm-cov",
  "more-asserts",
+ "serde_json",
  "tempfile",
 ]
 
