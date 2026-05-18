@@ -360,18 +360,18 @@ fn get_entry_value(node: &[u8], rec_num: usize) -> &[u8] {
 // - Returns the index the key should be inserted in to keep the array
 //   in order.
 // - Returns the lowest key that is greater than or equal to the search key.
-// If there are multiple copies of a key in the node, the index it chooses
-// within that span of keys is undefined.
+// If there are multiple copies of a key in the node, it will chose the lowest
+// indexed one (this is important when we have non-unique keys).
 fn find_key(node: &[u8], key: &[u8]) -> usize {
     let mut low = 0;
     let mut high = record_array::get_num_entries(node);
     while low < high {
         let mid = (low + high) / 2;
         let mid_key = get_entry_key(node, mid);
-        match key.cmp(mid_key) {
-            Ordering::Less => high = mid,
-            Ordering::Greater => low = mid + 1,
-            Ordering::Equal => return mid,
+        if key <= mid_key {
+            high = mid
+        } else {
+            low = mid + 1
         }
     }
 
@@ -775,6 +775,30 @@ mod tests {
 
         let mut cursor = btree_find(root_page, &[0xff; 255], false, &page_cache);
         assert_eq!(cursor.next(), None);
+    }
+
+    // If we have duplicate keys, ensure that a cursor find will hit all of them.
+    #[test]
+    fn test_btree_find_duplicate_key() {
+        let (page_cache, mut allocator, root_page) = build_btree(0);
+
+        btree_insert(root_page, "aardvark".as_bytes(), &[0u8], &page_cache, &mut allocator);
+        btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
+        btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
+        btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
+        btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
+        btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
+        btree_insert(root_page, "banana".as_bytes(), &[0u8], &page_cache, &mut allocator);
+        btree_insert(root_page, "crayon".as_bytes(), &[0u8], &page_cache, &mut allocator);
+        btree_insert(root_page, "domino".as_bytes(), &[0u8], &page_cache, &mut allocator);
+        btree_insert(root_page, "elephant".as_bytes(), &[0u8], &page_cache, &mut allocator);
+        btree_insert(root_page, "fish".as_bytes(), &[0u8], &page_cache, &mut allocator);
+        btree_insert(root_page, "grass".as_bytes(), &[0u8], &page_cache, &mut allocator);
+        let mut cursor = btree_find(root_page, "apple".as_bytes(), false, &page_cache);
+        for _ in 0..5 {
+            let (key, _) = cursor.next().expect("cursor didn't return value");
+            assert_eq!(key, "apple".as_bytes());
+        }
     }
 
     #[test]
