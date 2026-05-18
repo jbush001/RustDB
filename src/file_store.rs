@@ -146,7 +146,6 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_read_failure() {
-        let file = NamedTempFile::new().unwrap();
         let file = OpenOptions::new()
             .read(true)
             .write(true)
