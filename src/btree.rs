@@ -14,7 +14,7 @@
 //   limitations under the License.
 //
 
-// This is a B+ tree implementation. Keys are only stored in the leaf nodes.
+// This is a B+ tree implementation. Values are only stored in the leaf nodes.
 
 use std::cmp::Ordering;
 use crate::util::*;
@@ -33,7 +33,7 @@ struct NodeHeader {
     left_child: u64,
 }
 
-// Each node entry is:
+// Each entry is:
 // key_length: u16
 // key: variable length
 // value: variable length
@@ -248,12 +248,11 @@ fn btree_insert(root_node_fpid: u64,
     }
 }
 
-// TODO: make value an Option<>, and if it is not present, don't check its value.
-// The caller will know if they are treating keys uniquely and can choose not
-// to populate it.
+// If there are not unique keys, value should be specified here. Otherwise this will
+// arbitrarily delete one entry. If there are unique keys, it is not required.
 fn btree_delete(root_node_fpid: u64,
     key: &[u8],
-    value: &[u8],
+    value: Option<&[u8]>,
     page_cache: &PageCache)
 {
     // Since the btree doesn't enforce unique keys by default, we use a cursor
@@ -261,6 +260,7 @@ fn btree_delete(root_node_fpid: u64,
     // key/value tuple will be unique, although btree code does not enforce
     // that).
     let mut cursor = btree_find(root_node_fpid, key, false, page_cache);
+
     loop {
         // Need to save these because cursor will post-update
         let page_fpid = cursor.current_node_fpid;
@@ -271,7 +271,7 @@ fn btree_delete(root_node_fpid: u64,
         }
 
         let (entry_key, entry_val) = next.unwrap();
-        if key == entry_key && value == entry_val {
+        if key == entry_key && (value.is_none() || value.unwrap() == entry_val) {
             let mut page = page_cache.lock_page_mut(FilePageId(page_fpid));
 
             // TODO: if the record array is now empty, we should delete it, and walk up
@@ -783,7 +783,7 @@ mod tests {
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
         const INDEX_TO_DELETE: usize = 37;
-        btree_delete(root_page, gen_key_for_index(INDEX_TO_DELETE).as_slice(), &INDEX_TO_DELETE.to_le_bytes(), &page_cache);
+        btree_delete(root_page, gen_key_for_index(INDEX_TO_DELETE).as_slice(), Some(&INDEX_TO_DELETE.to_le_bytes()), &page_cache);
 
         let mut cursor = btree_iterate(root_page, false, &page_cache);
         for i in 0..NUM_ENTRIES {
@@ -806,10 +806,10 @@ mod tests {
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
         // Key is bogus
-        btree_delete(root_page, &"yolo".as_bytes(), &[0u8], &page_cache);
+        btree_delete(root_page, &"yolo".as_bytes(), Some(&[0u8]), &page_cache);
 
         // Key is present, but value doesn't match
-        btree_delete(root_page, gen_key_for_index(10).as_slice(), &[0u8], &page_cache);
+        btree_delete(root_page, gen_key_for_index(10).as_slice(), Some(&[0u8]), &page_cache);
 
         let mut cursor = btree_iterate(root_page, false, &page_cache);
         for i in 0..NUM_ENTRIES {
@@ -821,8 +821,39 @@ mod tests {
     }
 
     #[test]
+    fn test_btree_delete_no_value() {
+        const NUM_ENTRIES: usize = 103;
+        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+
+        // No value specified
+        const INDEX_TO_DELETE: usize = 10;
+        btree_delete(root_page, gen_key_for_index(INDEX_TO_DELETE).as_slice(), None, &page_cache);
+
+        let mut cursor = btree_iterate(root_page, false, &page_cache);
+        for i in 0..NUM_ENTRIES {
+            if i == INDEX_TO_DELETE {
+                continue;
+            }
+
+            let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
+            assert_eq!(key.as_slice(), gen_key_for_index(i));
+            assert_eq!(u64::from_le_bytes(val.try_into()
+                .expect("value was not 8 bytes")), i as u64);
+        }
+    }
+
+    #[test]
+    #[ignore = "Needs to be fixed, see comments in btree_delete"]
     fn test_btree_delete_all() {
-        // TODO: implement me (currently broken, as we don't clean up empty nodes)
+        const NUM_ENTRIES: usize = 67;
+        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+
+        for i in 0..NUM_ENTRIES {
+            btree_delete(root_page, gen_key_for_index(i).as_slice(), None, &page_cache);
+        }
+
+        let mut cursor = btree_iterate(root_page, false, &page_cache);
+        assert_eq!(cursor.next(), None);
     }
 
     // Just ensures it doesn't crash...
