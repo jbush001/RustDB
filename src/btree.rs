@@ -34,8 +34,10 @@ struct NodeHeader {
 }
 
 // Each node entry is:
-// key: 16 bytes
+// key_length: u16
+// key: variable length
 // value: variable length
+// (value length is inferred based on record length)
 
 const FLAG_LEAF: u16 = 1;
 
@@ -49,7 +51,7 @@ struct BTreeCursor {
 }
 
 impl Iterator for BTreeCursor {
-    type Item = (Vec<u8>, u64);
+    type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.current_node_fpid == INVALID_FPID {
@@ -58,7 +60,7 @@ impl Iterator for BTreeCursor {
 
         let page = self.page_cache.lock_page(FilePageId(self.current_node_fpid));
         let entry = (get_entry_key(&page, self.current_index).to_vec(),
-            get_entry_value(&page, self.current_index));
+            get_entry_value(&page, self.current_index).to_vec());
         let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
         if self.reverse {
             if self.current_index == 0 {
@@ -101,7 +103,8 @@ fn btree_iterate(root_node_fpid: u64, reverse: bool, page_cache: &PageCache) -> 
             let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
             current_node_fpid = header.left_child;
         } else {
-            current_node_fpid = get_entry_value(&page, current_index);
+            current_node_fpid = u64::from_le_bytes(get_entry_value(&page, current_index)
+                .try_into().expect("value was not 8 bytes"));
         }
     }
 }
@@ -134,14 +137,15 @@ fn btree_find(root_node_fpid: u64, key: &[u8], reverse: bool, page_cache: &PageC
             let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
             current_node_fpid = header.left_child;
         } else {
-            current_node_fpid = get_entry_value(&page, index - 1);
+            current_node_fpid = u64::from_le_bytes(get_entry_value(&page, index - 1)
+                .try_into().expect("value was not 8 bytes"));
         }
     }
 }
 
 fn btree_insert(root_node_fpid: u64,
     key: &[u8],
-    value: u64,
+    value: &[u8],
     page_cache: &PageCache,
     page_allocator: &mut PageAllocator)
 {
@@ -160,7 +164,8 @@ fn btree_insert(root_node_fpid: u64,
             let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
             current_node_fpid = header.left_child;
         } else {
-            current_node_fpid = get_entry_value(&page, index - 1);
+            current_node_fpid = u64::from_le_bytes(get_entry_value(&page, index - 1).try_into()
+                .expect("value was not 8 bytes"));
         }
 
         assert!(current_node_fpid != INVALID_FPID, "Interior node has non-leaf children");
@@ -168,12 +173,12 @@ fn btree_insert(root_node_fpid: u64,
 
     // We're now at a leaf. Insert and walk back up the tree splitting nodes
     // as needed.
-    let mut insert_value = value;
+    let mut insert_value = value.to_vec();
     let mut insert_key = key.to_vec();
     for node_fpid in path.iter().rev() {
         let mut page = page_cache.lock_page_mut(FilePageId(*node_fpid));
-        if record_array::get_free_space(&page) >= get_entry_size(&insert_key) {
-            insert_entry(&mut page, insert_key.as_slice(), insert_value);
+        if record_array::get_free_space(&page) >= get_entry_size(&insert_key, &insert_value) {
+            insert_entry(&mut page, insert_key.as_slice(), insert_value.as_slice());
             break;
         }
 
@@ -195,15 +200,15 @@ fn btree_insert(root_node_fpid: u64,
 
             // Now do the actual insertion
             if insert_key > split_key {
-                insert_entry(&mut new_page2, insert_key.as_slice(), insert_value);
+                insert_entry(&mut new_page2, insert_key.as_slice(), insert_value.as_slice());
             } else {
-                insert_entry(&mut new_page1, insert_key.as_slice(), insert_value);
+                insert_entry(&mut new_page1, insert_key.as_slice(), insert_value.as_slice());
             }
 
             // The root will have a single entry. It't no longer a leaf.
             init_btree_node(&mut page);
             set_not_leaf(&mut page);
-            append_entry(&mut page, &split_key, new_page_fpid2);
+            append_entry(&mut page, &split_key, &new_page_fpid2.to_le_bytes());
             let page_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut page[0..record_array::HEADER_SIZE]);
             page_header.left_child = new_page_fpid1;
             break;
@@ -232,20 +237,23 @@ fn btree_insert(root_node_fpid: u64,
 
             // Now do the actual insertion
             if insert_key > new_parent_key {
-                insert_entry(&mut new_page, insert_key.as_slice(), insert_value);
+                insert_entry(&mut new_page, insert_key.as_slice(), insert_value.as_slice());
             } else {
-                insert_entry(&mut page, insert_key.as_slice(), insert_value);
+                insert_entry(&mut page, insert_key.as_slice(), insert_value.as_slice());
             }
 
             insert_key = new_parent_key;
-            insert_value = new_page_fpid;
+            insert_value = new_page_fpid.to_le_bytes().to_vec();
         }
     }
 }
 
+// TODO: make value an Option<>, and if it is not present, don't check its value.
+// The caller will know if they are treating keys uniquely and can choose not
+// to populate it.
 fn btree_delete(root_node_fpid: u64,
     key: &[u8],
-    value: u64,
+    value: &[u8],
     page_cache: &PageCache)
 {
     // Since the btree doesn't enforce unique keys by default, we use a cursor
@@ -265,6 +273,10 @@ fn btree_delete(root_node_fpid: u64,
         let (entry_key, entry_val) = next.unwrap();
         if key == entry_key && value == entry_val {
             let mut page = page_cache.lock_page_mut(FilePageId(page_fpid));
+
+            // TODO: if the record array is now empty, we should delete it, and walk up
+            // the parent chain, potentially cascading the delete. Some other places
+            // in the code make assumptions there aren't empty nodes.
             record_array::delete_record(&mut page, index);
             break;
         }
@@ -285,7 +297,8 @@ fn print_btree(root_node_fpid: u64, page_cache: &PageCache) {
             }
 
             for i in 0..record_array::get_num_entries(&page) {
-                fifo.push(get_entry_value(&page, i));
+                fifo.push(u64::from_le_bytes(get_entry_value(&page, i).try_into()
+                .expect("value was not 8 bytes")));
             }
         }
     }
@@ -303,7 +316,7 @@ fn to_hex(bytes: &[u8]) -> String {
 fn print_node(node: &[u8]) {
     for i in 0..record_array::get_num_entries(node) {
         println!("{}. {} value {}", i,
-            to_hex(get_entry_key(node, i)), get_entry_value(node, i));
+            to_hex(get_entry_key(node, i)), to_hex(get_entry_value(node, i)));
     }
 }
 
@@ -324,21 +337,23 @@ fn set_not_leaf(node: &mut [u8]) {
     header.flags &= !FLAG_LEAF;
 }
 
-fn get_entry_size(key: &[u8]) -> usize {
-    // 8 bytes for value (64 bit integer)
-    // 2 bytes for the entry length
-    // 2 bytes for the index table entry
-    key.len() + 8 + 2 + 2
+fn get_entry_size(key: &[u8], value: &[u8]) -> usize {
+    // 2 bytes for the index table entry (in record_array)
+    // 2 bytes for the entry length (in record_array)
+    // 2 bytes for the key length
+    key.len() + value.len() + 6
 }
 
 fn get_entry_key(node: &[u8], rec_num: usize) -> &[u8] {
     let rec = record_array::get_record(node, rec_num);
-    &rec[8..rec.len()]
+    let key_len = get_u16(rec, 0) as usize;
+    &rec[2..2 + key_len]
 }
 
-fn get_entry_value(node: &[u8], rec_num: usize) -> u64 {
+fn get_entry_value(node: &[u8], rec_num: usize) -> &[u8] {
     let rec = record_array::get_record(node, rec_num);
-    get_u64(rec, 0)
+    let key_len = get_u16(rec, 0) as usize;
+    &rec[2 + key_len..]
 }
 
 // A few ways to describe this:
@@ -364,24 +379,29 @@ fn find_key(node: &[u8], key: &[u8]) -> usize {
 }
 
 // Insert a entry into a single node.
-fn insert_entry(node: &mut [u8], key: &[u8], value: u64) {
+fn insert_entry(node: &mut [u8], key: &[u8], value: &[u8]) {
     let index = find_key(node, key);
-    let mut entry = Vec::with_capacity(key.len() + 8);
-    entry.extend_from_slice(&value.to_le_bytes());
+    let mut entry = Vec::with_capacity(key.len() + value.len() + 2);
+    entry.push((key.len() & 0xff) as u8);
+    entry.push((key.len() >> 8) as u8);
     entry.extend_from_slice(key);
+    entry.extend_from_slice(value);
     record_array::insert_record(node, index, &entry);
 }
 
 // Helper function to add entry to next available slot. This assumes the entry is
 // added in order. It assumes there is adequate space in the node.
 // Returns entry size
-fn append_entry(node: &mut [u8], key: &[u8], value: u64) -> usize {
-    let mut entry = Vec::with_capacity(key.len() + 8);
-    entry.extend_from_slice(&value.to_le_bytes());
+fn append_entry(node: &mut [u8], key: &[u8], value: &[u8]) -> usize {
+    let mut entry: Vec<u8> = Vec::with_capacity(key.len() + value.len() + 2);
+    // Length
+    entry.push((key.len() & 0xff) as u8);
+    entry.push((key.len() >> 8) as u8);
     entry.extend_from_slice(key);
+    entry.extend_from_slice(value);
     record_array::insert_record(node, record_array::get_num_entries(node), &entry);
 
-    get_entry_size(key)
+    get_entry_size(key, value)
 }
 
 // Returns the separator key.
@@ -411,7 +431,7 @@ fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
         // Remove the separator key, which will go into the parent. Save its value
         // into the left child.
         let header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut out2[0..record_array::HEADER_SIZE]);
-        header.left_child = get_entry_value(orig, orig_index);
+        header.left_child = u64::from_le_bytes(get_entry_value(orig, orig_index).try_into().expect("value was not 8 bytes"));
         orig_index += 1;
     }
 
@@ -456,18 +476,16 @@ mod tests {
         let mut node: [u8; 4096] = [0; 4096];
         init_btree_node(&mut node);
 
-        append_entry(&mut node, "foobar".as_bytes(), 0x12345678abcdef);
-        append_entry(&mut node, "zzzz".as_bytes(), 0xfedbca87654321);
+        append_entry(&mut node, "foobar".as_bytes(), "abcdefghijklmnopqrstuwxyz".as_bytes());
+        append_entry(&mut node, "zzzz".as_bytes(), "3.1415926535897932384626433832".as_bytes());
         sanity_check_node(&node);
         assert_eq!(record_array::get_num_entries(&node), 2);
 
-        let key_bytes0 = get_entry_key(&node, 0);
-        assert_eq!(key_bytes0, "foobar".as_bytes());
-        assert_eq!(get_entry_value(&node, 0), 0x12345678abcdef);
+        assert_eq!(get_entry_key(&node, 0), "foobar".as_bytes());
+        assert_eq!(get_entry_value(&node, 0), "abcdefghijklmnopqrstuwxyz".as_bytes());
 
-        let key_bytes1 = get_entry_key(&node, 1);
-        assert_eq!(key_bytes1, "zzzz".as_bytes());
-        assert_eq!(get_entry_value(&node, 1), 0xfedbca87654321);
+        assert_eq!(get_entry_key(&node, 1), "zzzz".as_bytes());
+        assert_eq!(get_entry_value(&node, 1), "3.1415926535897932384626433832".as_bytes());
     }
 
     #[test]
@@ -475,10 +493,10 @@ mod tests {
         let mut node: [u8; 4096] = [0; 4096];
         init_btree_node(&mut node);
 
-        append_entry(&mut node, "abacus".as_bytes(), 0);
-        append_entry(&mut node, "banana".as_bytes(), 0);
-        append_entry(&mut node, "beta".as_bytes(), 0);
-        append_entry(&mut node, "zebra".as_bytes(), 0);
+        append_entry(&mut node, "abacus".as_bytes(), "0".as_bytes());
+        append_entry(&mut node, "banana".as_bytes(), "0".as_bytes());
+        append_entry(&mut node, "beta".as_bytes(), "0".as_bytes());
+        append_entry(&mut node, "zebra".as_bytes(), "0".as_bytes());
         sanity_check_node(&node);
         assert_eq!(record_array::get_num_entries(&node), 4);
 
@@ -505,17 +523,19 @@ mod tests {
         init_btree_node(&mut node);
         let init_free_space = record_array::get_free_space(&node);
         let key1 = "foo".as_bytes();
-        insert_entry(&mut node, key1, 0x1234);
+        let val1 = "00000000000000000000000000000".as_bytes();
+        insert_entry(&mut node, key1, &val1);
         assert_lt!(record_array::get_free_space(&node), init_free_space);
         assert_eq!(record_array::get_free_space(&node), init_free_space -
-            get_entry_size(key1));
+            get_entry_size(key1, &val1));
 
         let key2 = "abcdefghijklmnopqrstuvwxyz".as_bytes();
+        let val2 = "..ooOOO".as_bytes();
         let init_free_space = record_array::get_free_space(&node);
-        insert_entry(&mut node, key2, 0x1234);
+        insert_entry(&mut node, key2, &val2);
         assert_lt!(record_array::get_free_space(&node), init_free_space);
         assert_eq!(record_array::get_free_space(&node), init_free_space -
-            get_entry_size(key2));
+            get_entry_size(key2, &val2));
     }
 
     #[test]
@@ -524,10 +544,10 @@ mod tests {
         init_btree_node(&mut node);
 
         // Note these are out of order
-        insert_entry(&mut node, "aardvark".as_bytes(), 1000);
-        insert_entry(&mut node, "zebra".as_bytes(), 4000);
-        insert_entry(&mut node, "apple".as_bytes(), 2000);
-        insert_entry(&mut node, "banana".as_bytes(), 3000);
+        insert_entry(&mut node, "aardvark".as_bytes(), &[0u8]);
+        insert_entry(&mut node, "zebra".as_bytes(), &[0u8]);
+        insert_entry(&mut node, "apple".as_bytes(), &[0u8]);
+        insert_entry(&mut node, "banana".as_bytes(), &[0u8]);
         sanity_check_node(&node);
         assert_eq!(record_array::get_num_entries(&node), 4);
 
@@ -543,7 +563,7 @@ mod tests {
         let mut node: [u8; 4096] = [0; 4096];
         init_btree_node(&mut node);
         for _ in 0..4096 {
-            insert_entry(&mut node, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes(), 0);
+            insert_entry(&mut node, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes(), &[0u8]);
         }
     }
 
@@ -558,7 +578,7 @@ mod tests {
         const PAGE1_ENTRIES: usize = 25;
         for i in 0..PAGE1_ENTRIES {
             let key = vec![b'A' + i as u8; 128];
-            insert_entry(&mut node1, &key, i as u64);
+            insert_entry(&mut node1, &key, &(i as u64).to_le_bytes());
         }
 
         sanity_check_node(&node1);
@@ -574,7 +594,8 @@ mod tests {
         let header2: &NodeHeader = bytemuck::from_bytes(&node2[0..record_array::HEADER_SIZE]);
         assert_eq!(header2.left_child, header1.left_child);
         let header3: &NodeHeader = bytemuck::from_bytes(&node3[0..record_array::HEADER_SIZE]);
-        assert_eq!(header3.left_child, get_entry_value(&node1, orig_sep_index));
+        assert_eq!(header3.left_child, u64::from_le_bytes(get_entry_value(&node1, orig_sep_index)
+            .try_into().expect("value was not 8 bytes")));
 
         // Ensure all entries are present and in order
         let node2_recs = record_array::get_num_entries(&node2);
@@ -607,7 +628,7 @@ mod tests {
         const PAGE1_ENTRIES: usize = 25;
         for i in 0..PAGE1_ENTRIES {
             let key = vec![b'A' + i as u8; 128];
-            insert_entry(&mut node1, &key, i as u64);
+            insert_entry(&mut node1, &key, &(i as u64).to_le_bytes());
         }
 
         sanity_check_node(&node1);
@@ -672,7 +693,7 @@ mod tests {
         }
 
         for i in prand_order(num_entries) {
-            btree_insert(root_page, &gen_key_for_index(i), i as u64,
+            btree_insert(root_page, &gen_key_for_index(i), &(i as u64).to_le_bytes(),
                 &page_cache, &mut allocator);
         }
 
@@ -686,7 +707,8 @@ mod tests {
         let mut i = 0;
         for (key, val) in btree_iterate(root_page, false, &page_cache) {
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(val, i as u64);
+            assert_eq!(u64::from_le_bytes(val.try_into()
+                .expect("value was not 8 bytes")), i as u64);
             i += 1;
         }
     }
@@ -700,7 +722,8 @@ mod tests {
         for i in (0..NUM_ENTRIES).rev() {
             let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(val, i as u64);
+            assert_eq!(u64::from_le_bytes(val.try_into()
+                .expect("value was not 8 bytes")), i as u64);
         }
 
         assert_eq!(cursor.next(), None);
@@ -716,7 +739,8 @@ mod tests {
         for i in START_KEY_IDX..START_KEY_IDX + 10 {
             let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), &gen_key_for_index(i));
-            assert_eq!(val, i as u64);
+            assert_eq!(u64::from_le_bytes(val.try_into()
+                .expect("value was not 8 bytes")), i as u64);
         }
     }
 
@@ -729,7 +753,8 @@ mod tests {
         let mut cursor = btree_find(root_page, &[0u8], false, &page_cache);
         let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
         assert_eq!(key.as_slice(), &gen_key_for_index(0));
-        assert_eq!(val, 0u64);
+        assert_eq!(u64::from_le_bytes(val.try_into()
+                .expect("value was not 8 bytes")), 0u64);
     }
 
     // Key is before first key and going in reverse. Nothing to fetch.
@@ -758,7 +783,7 @@ mod tests {
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
         const INDEX_TO_DELETE: usize = 37;
-        btree_delete(root_page, gen_key_for_index(INDEX_TO_DELETE).as_slice(), INDEX_TO_DELETE as u64, &page_cache);
+        btree_delete(root_page, gen_key_for_index(INDEX_TO_DELETE).as_slice(), &INDEX_TO_DELETE.to_le_bytes(), &page_cache);
 
         let mut cursor = btree_iterate(root_page, false, &page_cache);
         for i in 0..NUM_ENTRIES {
@@ -768,7 +793,8 @@ mod tests {
 
             let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(val, i as u64);
+            assert_eq!(u64::from_le_bytes(val.try_into()
+                .expect("value was not 8 bytes")), i as u64);
         }
 
         assert!(cursor.next().is_none());
@@ -780,17 +806,23 @@ mod tests {
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
         // Key is bogus
-        btree_delete(root_page, &"yolo".as_bytes(), 11, &page_cache);
+        btree_delete(root_page, &"yolo".as_bytes(), &[0u8], &page_cache);
 
         // Key is present, but value doesn't match
-        btree_delete(root_page, gen_key_for_index(10).as_slice(), 11, &page_cache);
+        btree_delete(root_page, gen_key_for_index(10).as_slice(), &[0u8], &page_cache);
 
         let mut cursor = btree_iterate(root_page, false, &page_cache);
         for i in 0..NUM_ENTRIES {
             let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(val, i as u64);
+            assert_eq!(u64::from_le_bytes(val.try_into()
+                .expect("value was not 8 bytes")), i as u64);
         }
+    }
+
+    #[test]
+    fn test_btree_delete_all() {
+        // TODO: implement me (currently broken, as we don't clean up empty nodes)
     }
 
     // Just ensures it doesn't crash...
