@@ -31,6 +31,7 @@ impl FileStore {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)?;
         let length = file.metadata().unwrap().len();
 

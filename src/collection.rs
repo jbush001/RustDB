@@ -18,7 +18,6 @@ use serde_json::Value;
 use crate::btree::*;
 use crate::page_cache::*;
 use crate::page_allocator::*;
-use crate::btree::*;
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
 struct DocID(u64);
@@ -40,7 +39,7 @@ impl Collection {
         btree_insert(self.document_btree_root,
             &docid.to_be_bytes(), // Note: docid is stored bigendian so its in order.
             &content,
-            &page_cache,
+            page_cache,
             page_allocator);
 
         DocID(docid)

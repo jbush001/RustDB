@@ -16,7 +16,6 @@
 
 // This is a B+ tree implementation. Values are only stored in the leaf nodes.
 
-use std::cmp::Ordering;
 use crate::util::*;
 use crate::page_cache::{PageCache, FilePageId, PAGE_SIZE};
 use crate::page_allocator::{PageAllocator};
@@ -286,7 +285,7 @@ fn btree_delete(root_node_fpid: u64,
 fn print_btree(root_node_fpid: u64, page_cache: &PageCache) {
     let mut fifo: Vec<u64> = Vec::new();
     fifo.push(root_node_fpid);
-    while fifo.len() != 0 {
+    while !fifo.is_empty() {
         let next = fifo.remove(0);
         let page = page_cache.lock_page_mut(FilePageId(next));
         print_node(&page);
