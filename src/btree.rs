@@ -40,10 +40,10 @@ struct NodeHeader {
 
 const FLAG_LEAF: u16 = 1;
 
-const INVALID_FPID: u64 = 0;
+const INVALID_FPID: FilePageId = FilePageId(0);
 
 pub struct BTreeCursor {
-    current_node_fpid: u64,
+    current_node_fpid: FilePageId,
     current_index: usize,
     reverse: bool,
     page_cache: PageCache
@@ -57,15 +57,15 @@ impl Iterator for BTreeCursor {
             return None
         }
 
-        let page = self.page_cache.lock_page(FilePageId(self.current_node_fpid));
+        let page = self.page_cache.lock_page(self.current_node_fpid);
         let entry = (get_entry_key(&page, self.current_index).to_vec(),
             get_entry_value(&page, self.current_index).to_vec());
         let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
         if self.reverse {
             if self.current_index == 0 {
-                self.current_node_fpid = header.prev_sib;
+                self.current_node_fpid = FilePageId(header.prev_sib);
                 if self.current_node_fpid != INVALID_FPID {
-                    let page = self.page_cache.lock_page(FilePageId(self.current_node_fpid));
+                    let page = self.page_cache.lock_page(self.current_node_fpid);
                     self.current_index = record_array::get_num_entries(&page) - 1;
                 }
             } else {
@@ -73,7 +73,7 @@ impl Iterator for BTreeCursor {
             }
         } else {
             if self.current_index == record_array::get_num_entries(&page) - 1 {
-                self.current_node_fpid = header.next_sib;
+                self.current_node_fpid = FilePageId(header.next_sib);
                 self.current_index = 0;
             } else {
                 self.current_index += 1;
@@ -84,10 +84,19 @@ impl Iterator for BTreeCursor {
     }
 }
 
-pub fn btree_iterate(root_node_fpid: u64, reverse: bool, page_cache: &PageCache) -> BTreeCursor {
+pub fn btree_create(page_cache: &PageCache,
+    page_allocator: &mut PageAllocator) -> FilePageId {
+    let btree_root = page_allocator.alloc();
+    let mut page = page_cache.lock_page_mut(btree_root);
+    init_btree_node(&mut page);
+
+    btree_root
+}
+
+pub fn btree_iterate(root_node_fpid: FilePageId, reverse: bool, page_cache: &PageCache) -> BTreeCursor {
     let mut current_node_fpid = root_node_fpid;
     loop {
-        let page = page_cache.lock_page(FilePageId(current_node_fpid));
+        let page = page_cache.lock_page(current_node_fpid);
         let current_index = if reverse { record_array::get_num_entries(&page) - 1 } else { 0 };
         if is_leaf(&page) {
             return BTreeCursor {
@@ -100,18 +109,18 @@ pub fn btree_iterate(root_node_fpid: u64, reverse: bool, page_cache: &PageCache)
 
         if current_index == 0 {
             let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
-            current_node_fpid = header.left_child;
+            current_node_fpid = FilePageId(header.left_child);
         } else {
-            current_node_fpid = u64::from_le_bytes(get_entry_value(&page, current_index)
-                .try_into().expect("value was not 8 bytes"));
+            current_node_fpid = FilePageId(u64::from_le_bytes(get_entry_value(&page, current_index)
+                .try_into().expect("value was not 8 bytes")));
         }
     }
 }
 
-pub fn btree_find(root_node_fpid: u64, key: &[u8], reverse: bool, page_cache: &PageCache) -> BTreeCursor {
+pub fn btree_find(root_node_fpid: FilePageId, key: &[u8], reverse: bool, page_cache: &PageCache) -> BTreeCursor {
     let mut current_node_fpid = root_node_fpid;
     loop {
-        let page = page_cache.lock_page(FilePageId(current_node_fpid));
+        let page = page_cache.lock_page(current_node_fpid);
         let index = find_key(&page, key);
         if is_leaf(&page) {
             if (reverse && index == 0) || (index == record_array::get_num_entries(&page)) {
@@ -134,26 +143,26 @@ pub fn btree_find(root_node_fpid: u64, key: &[u8], reverse: bool, page_cache: &P
 
         if index == 0 {
             let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
-            current_node_fpid = header.left_child;
+            current_node_fpid = FilePageId(header.left_child);
         } else {
-            current_node_fpid = u64::from_le_bytes(get_entry_value(&page, index - 1)
-                .try_into().expect("value was not 8 bytes"));
+            current_node_fpid = FilePageId(u64::from_le_bytes(get_entry_value(&page, index - 1)
+                .try_into().expect("value was not 8 bytes")));
         }
     }
 }
 
-pub fn btree_insert(root_node_fpid: u64,
+pub fn btree_insert(root_node_fpid: FilePageId,
     key: &[u8],
     value: &[u8],
     page_cache: &PageCache,
     page_allocator: &mut PageAllocator)
 {
     let mut current_node_fpid = root_node_fpid;
-    let mut path: Vec<u64> = Vec::new();
+    let mut path: Vec<FilePageId> = Vec::new();
 
     loop {
         path.push(current_node_fpid);
-        let page = page_cache.lock_page(FilePageId(current_node_fpid));
+        let page = page_cache.lock_page(current_node_fpid);
         if is_leaf(&page) {
             break;
         }
@@ -161,10 +170,10 @@ pub fn btree_insert(root_node_fpid: u64,
         let index = find_key(&page, key);
         if index == 0 {
             let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
-            current_node_fpid = header.left_child;
+            current_node_fpid = FilePageId(header.left_child);
         } else {
-            current_node_fpid = u64::from_le_bytes(get_entry_value(&page, index - 1).try_into()
-                .expect("value was not 8 bytes"));
+            current_node_fpid = FilePageId(u64::from_le_bytes(get_entry_value(&page, index - 1).try_into()
+                .expect("value was not 8 bytes")));
         }
 
         assert!(current_node_fpid != INVALID_FPID, "Interior node has non-leaf children");
@@ -175,7 +184,7 @@ pub fn btree_insert(root_node_fpid: u64,
     let mut insert_value = value.to_vec();
     let mut insert_key = key.to_vec();
     for node_fpid in path.iter().rev() {
-        let mut page = page_cache.lock_page_mut(FilePageId(*node_fpid));
+        let mut page = page_cache.lock_page_mut(*node_fpid);
         if record_array::get_free_space(&page) >= get_entry_size(&insert_key, &insert_value) {
             insert_entry(&mut page, insert_key.as_slice(), insert_value.as_slice());
             break;
@@ -187,15 +196,15 @@ pub fn btree_insert(root_node_fpid: u64,
             let new_page_fpid1 = page_allocator.alloc();
             let new_page_fpid2 = page_allocator.alloc();
 
-            let mut new_page1 = page_cache.lock_page_mut(FilePageId(new_page_fpid1));
-            let mut new_page2 = page_cache.lock_page_mut(FilePageId(new_page_fpid2));
+            let mut new_page1 = page_cache.lock_page_mut(new_page_fpid1);
+            let mut new_page2 = page_cache.lock_page_mut(new_page_fpid2);
             let split_key = split_node(&page, &mut new_page1, &mut new_page2);
 
             // This really only matters when the root is a leaf
             let header1: &mut NodeHeader = bytemuck::from_bytes_mut(&mut new_page1[0..record_array::HEADER_SIZE]);
-            header1.next_sib = new_page_fpid2;
+            header1.next_sib = new_page_fpid2.0;
             let header2: &mut NodeHeader = bytemuck::from_bytes_mut(&mut new_page2[0..record_array::HEADER_SIZE]);
-            header2.prev_sib = new_page_fpid1;
+            header2.prev_sib = new_page_fpid1.0;
 
             // Now do the actual insertion
             if insert_key > split_key {
@@ -207,29 +216,29 @@ pub fn btree_insert(root_node_fpid: u64,
             // The root will have a single entry. It't no longer a leaf.
             init_btree_node(&mut page);
             set_not_leaf(&mut page);
-            append_entry(&mut page, &split_key, &new_page_fpid2.to_le_bytes());
+            append_entry(&mut page, &split_key, &new_page_fpid2.0.to_le_bytes());
             let page_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut page[0..record_array::HEADER_SIZE]);
-            page_header.left_child = new_page_fpid1;
+            page_header.left_child = new_page_fpid1.0;
             break;
         } else {
             // Split leaf or interior page.
             let new_page_fpid = page_allocator.alloc();
             let mut temp: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
-            let mut new_page = page_cache.lock_page_mut(FilePageId(new_page_fpid));
+            let mut new_page = page_cache.lock_page_mut(new_page_fpid);
             let new_parent_key = split_node(&page, &mut temp, &mut new_page);
             if is_leaf(&page) {
                 let old_page_header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
                 let temp_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut temp[0..record_array::HEADER_SIZE]);
                 let new_page_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut new_page[0..record_array::HEADER_SIZE]);
                 temp_header.prev_sib = old_page_header.prev_sib;
-                temp_header.next_sib = new_page_fpid;
-                new_page_header.prev_sib = *node_fpid;
+                temp_header.next_sib = new_page_fpid.0;
+                new_page_header.prev_sib = (*node_fpid).0;
                 new_page_header.next_sib = old_page_header.next_sib;
 
                 // Need to fix back-link
                 let mut next_sib_page = page_cache.lock_page_mut(FilePageId(old_page_header.next_sib));
                 let next_sib_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut next_sib_page[0..record_array::HEADER_SIZE]);
-                next_sib_header.prev_sib = new_page_fpid;
+                next_sib_header.prev_sib = new_page_fpid.0;
             }
 
             page.copy_from_slice(&temp);
@@ -242,14 +251,14 @@ pub fn btree_insert(root_node_fpid: u64,
             }
 
             insert_key = new_parent_key;
-            insert_value = new_page_fpid.to_le_bytes().to_vec();
+            insert_value = new_page_fpid.0.to_le_bytes().to_vec();
         }
     }
 }
 
 // If there are not unique keys, value should be specified here. Otherwise this will
 // arbitrarily delete one entry. If there are unique keys, it is not required.
-fn btree_delete(root_node_fpid: u64,
+fn btree_delete(root_node_fpid: FilePageId,
     key: &[u8],
     value: Option<&[u8]>,
     page_cache: &PageCache)
@@ -271,7 +280,7 @@ fn btree_delete(root_node_fpid: u64,
 
         let (entry_key, entry_val) = next.unwrap();
         if key == entry_key && (value.is_none() || value.unwrap() == entry_val) {
-            let mut page = page_cache.lock_page_mut(FilePageId(page_fpid));
+            let mut page = page_cache.lock_page_mut(page_fpid);
 
             // TODO: if the record array is now empty, we should delete it, and walk up
             // the parent chain, potentially cascading the delete. Some other places
@@ -282,22 +291,22 @@ fn btree_delete(root_node_fpid: u64,
     }
 }
 
-fn print_btree(root_node_fpid: u64, page_cache: &PageCache) {
-    let mut fifo: Vec<u64> = Vec::new();
+fn print_btree(root_node_fpid: FilePageId, page_cache: &PageCache) {
+    let mut fifo: Vec<FilePageId> = Vec::new();
     fifo.push(root_node_fpid);
     while !fifo.is_empty() {
         let next = fifo.remove(0);
-        let page = page_cache.lock_page(FilePageId(next));
+        let page = page_cache.lock_page(next);
         print_node(&page);
         if !is_leaf(&page) {
             let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
-            if header.left_child != INVALID_FPID {
-                fifo.push(header.left_child);
+            if header.left_child != INVALID_FPID.0 {
+                fifo.push(FilePageId(header.left_child));
             }
 
             for i in 0..record_array::get_num_entries(&page) {
-                fifo.push(u64::from_le_bytes(get_entry_value(&page, i).try_into()
-                .expect("value was not 8 bytes")));
+                fifo.push(FilePageId(u64::from_le_bytes(get_entry_value(&page, i).try_into()
+                .expect("value was not 8 bytes"))));
             }
         }
     }
@@ -680,7 +689,7 @@ mod tests {
         vec![index as u8; (index % 64) + 64]
     }
 
-    fn build_btree(num_entries: usize) -> (PageCache, PageAllocator, u64) {
+    fn build_btree(num_entries: usize) -> (PageCache, PageAllocator, FilePageId) {
         let mock_io: Rc<RefCell<dyn PersistentStore>> =
             Rc::new(RefCell::new(MockPersistentStore::default()));
         let mut page_cache = PageCache::new(50, Rc::clone(&mock_io));
@@ -691,12 +700,7 @@ mod tests {
 
         let mut allocator = PageAllocator::new(&mut page_cache);
 
-        let root_page = allocator.alloc();
-        {
-            let mut node = page_cache.lock_page_mut(FilePageId(root_page));
-            init_btree_node(&mut node);
-        }
-
+        let root_page = btree_create(&page_cache, &mut allocator);
         for i in prand_order(num_entries) {
             btree_insert(root_page, &gen_key_for_index(i), &(i as u64).to_le_bytes(),
                 &page_cache, &mut allocator);

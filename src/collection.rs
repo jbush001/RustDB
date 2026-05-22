@@ -18,13 +18,21 @@ use serde_json::Value;
 use crate::btree::*;
 use crate::page_cache::*;
 use crate::page_allocator::*;
+use regex::Regex;
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
 struct DocID(u64);
 
+// TODO: collection metadata is not persisted.
+struct Index {
+    field: FieldPath,
+    btree_root: FilePageId
+}
+
 struct Collection {
     next_docid: u64,
-    document_btree_root: u64,
+    document_btree_root: FilePageId,
+    indices: Vec<Index>
 }
 
 impl Collection {
@@ -42,7 +50,31 @@ impl Collection {
             page_cache,
             page_allocator);
 
+        // Update indices
+        for index in &self.indices {
+            let result = lookup_field(&index.field, document);
+            if result.is_ok() {
+                // TODO: this just inserts as a string, which does not
+                // work for numbers.
+                btree_insert(index.btree_root,
+                    &result.unwrap().to_string().as_bytes(),
+                    &docid.to_le_bytes(),
+                    page_cache,
+                    page_allocator);
+            }
+        }
+
         DocID(docid)
+    }
+
+    fn create_index(&mut self, path: &FieldPath, page_cache: &PageCache,
+        page_allocator: &mut PageAllocator) {
+        let index = Index {
+            field: path.clone(),
+            btree_root: btree_create(page_cache, page_allocator)
+        };
+
+        self.indices.push(index)
     }
 
     fn iterate(&mut self, page_cache: &PageCache) -> impl Iterator<Item = (DocID, Value)> {
@@ -54,8 +86,97 @@ impl Collection {
             (docid, doc)
         })
     }
+
+    // TODO: need to delete from collection
+
 }
 
+#[derive(Debug, Clone)]
+enum PathElement {
+    ArrayIndex(usize),
+    FieldName(String)
+}
+
+impl std::fmt::Display for PathElement {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        match self {
+            PathElement::ArrayIndex(index) => write!(f, "[{}]", index)?,
+            PathElement::FieldName(name) => write!(f, ".{}", name)?
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FieldPath(Vec<PathElement>);
+
+impl std::fmt::Display for FieldPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        for elem in &self.0 {
+            elem.fmt(f)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl FieldPath {
+    fn new(path_str: &str) -> FieldPath {
+        let index_re = Regex::new(r"^([a-zA-Z0-9_\-]+)\[([0-9]+)\]$").unwrap();
+        let mut elements: Vec<PathElement> = Vec::new();
+        for elem in path_str.split('.') {
+            if let Some(cap) = index_re.captures(elem) {
+                elements.push(PathElement::FieldName(cap[1].to_string()));
+                elements.push(PathElement::ArrayIndex(cap[2].parse().unwrap()));
+            } else {
+                elements.push(PathElement::FieldName(elem.to_string()));
+            }
+        }
+
+        FieldPath(elements)
+    }
+}
+
+fn lookup_field(path: &FieldPath, record: &Value)
+    -> Result<Value, String> {
+    let mut current_val = record;
+    let root = PathElement::FieldName("".to_string()); // TODO: this incurs allocation costs, slow.
+    let mut parent = &root;
+    for elem in &path.0 {
+        match elem {
+            PathElement::ArrayIndex(index) =>  {
+                match current_val {
+                    Value::Array(arr) => {
+                        if *index >= arr.len() {
+                            return Err(format!("Array index {} out of bounds for {}", *index, parent));
+                        }
+
+                        current_val = &arr[*index];
+                    },
+                    _ => { return Err(format!("Indexed non-array {}", parent)); }
+                }
+            }
+
+            PathElement::FieldName(name) => {
+                match current_val {
+                    Value::Object(obj) => {
+                        if let Some(val) = obj.get(name) {
+                            current_val = val;
+                        } else {
+                            return Err(format!("Unknown field {}", name));
+                        }
+                    },
+                    _ => { return Err(format!("Attempt to access field {} on non-object", name)); }
+                }
+            }
+        }
+
+        parent = elem;
+    }
+
+    Ok(current_val.clone())
+}
 
 #[cfg(test)]
 mod tests {
@@ -75,8 +196,7 @@ mod tests {
         })
     }
 
-    #[test]
-    fn test_insert() {
+    fn create_collection() -> (PageCache, PageAllocator, Collection) {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
         let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
         {
@@ -87,14 +207,22 @@ mod tests {
         let mut allocator = PageAllocator::new(&mut page_cache);
         let document_btree_root = allocator.alloc();
         {
-            let mut node = page_cache.lock_page_mut(FilePageId(document_btree_root));
+            let mut node = page_cache.lock_page_mut(document_btree_root);
             init_btree_node(&mut node);
         }
 
-        let mut collection = Collection {
+        let collection = Collection {
             next_docid: 1,
-            document_btree_root
+            document_btree_root,
+            indices: Vec::new()
         };
+
+        (page_cache, allocator, collection)
+    }
+
+    #[test]
+    fn test_insert() {
+        let (page_cache, mut allocator, mut collection) = create_collection();
 
         let mut docids: Vec<DocID> = Vec::new();
         for i in 0..100 {
@@ -108,5 +236,144 @@ mod tests {
             assert_eq!(create_document(i), value);
             i += 1;
         }
+    }
+
+    #[test]
+    fn test_index() {
+        let (mut page_cache, mut allocator, mut collection) = create_collection();
+
+        collection.create_index(&FieldPath::new("age"), &mut page_cache, &mut allocator);
+
+        let doc1 = serde_json::from_str(r#"{"name": "James Smith", "age": 39}"#).unwrap();
+        let docid1 = collection.insert_document(&doc1, &mut page_cache, &mut allocator);
+        let doc2 = serde_json::from_str(r#"{"name": "Edward Jones", "age": 13}"#).unwrap();
+        let docid2 = collection.insert_document(&doc2, &mut page_cache, &mut allocator);
+        let doc3 = serde_json::from_str(r#"{"name": "Michael James", "age": 32}"#).unwrap();
+        let docid3 = collection.insert_document(&doc3, &mut page_cache, &mut allocator);
+        let doc4 = serde_json::from_str(r#"{"name": "Adam Mitchell", "age": 27}"#).unwrap();
+        let docid4 = collection.insert_document(&doc4, &mut page_cache, &mut allocator);
+
+        let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
+        let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(key1, "13".as_bytes());
+        assert_eq!(u64::from_le_bytes(val1.try_into().unwrap()), docid2.0);
+
+        let Some((key2, val2)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(key2, "27".as_bytes());
+        assert_eq!(u64::from_le_bytes(val2.try_into().unwrap()), docid4.0);
+
+        let Some((key3, val3)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(key3, "32".as_bytes());
+        assert_eq!(u64::from_le_bytes(val3.try_into().unwrap()), docid3.0);
+
+        let Some((key4, val4)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(key4, "39".as_bytes());
+        assert_eq!(u64::from_le_bytes(val4.try_into().unwrap()), docid1.0);
+
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_index_missing_key() {
+        // If we set up an index and that field is not present in a document,
+        // we'll silently skip adding it to the index.
+        let (mut page_cache, mut allocator, mut collection) = create_collection();
+
+        collection.create_index(&FieldPath::new("age"), &mut page_cache, &mut allocator);
+
+        let doc1 = serde_json::from_str(r#"{"name": "James Smith", "age": 39}"#).unwrap();
+        let docid1 = collection.insert_document(&doc1, &mut page_cache, &mut allocator);
+        let doc2 = serde_json::from_str(r#"{"name": "Edward Jones"}"#).unwrap();
+        collection.insert_document(&doc2, &mut page_cache, &mut allocator);
+
+        let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
+        let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(key1, "39".as_bytes());
+        assert_eq!(u64::from_le_bytes(val1.try_into().unwrap()), docid1.0);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_path_display() {
+        let path = FieldPath::new("phones[1].number");
+        assert_eq!(path.to_string(), ".phones[1].number");
+    }
+
+    const JSON_EXAMPLE: &str = r#"
+        {
+            "name": "Bob Dobalina",
+            "age": 45,
+            "phones": [
+                {
+                    "number": "867-5309",
+                    "type": "home"
+                },
+                {
+                    "number": "+15551212",
+                    "type": "mobile"
+                }
+            ]
+        }
+    "#;
+
+    #[test]
+    fn test_lookup_field1() {
+        let doc: Value = serde_json::from_str(JSON_EXAMPLE).unwrap();
+
+        let path = FieldPath::new("phones[1].number");
+        let fieldval = lookup_field(&path, &doc).unwrap();
+        assert_eq!(fieldval.as_str().unwrap(), "+15551212".to_string());
+    }
+
+    #[test]
+    fn test_lookup_field2() {
+        let doc: Value = serde_json::from_str(JSON_EXAMPLE).unwrap();
+        let path = FieldPath::new("age");
+        let fieldval = lookup_field(&path, &doc).unwrap();
+        assert_eq!(fieldval.as_number().unwrap().as_u64().unwrap(), 45u64);
+    }
+
+    #[test]
+    fn test_bad_lookup_not_array() {
+        let doc: Value = serde_json::from_str(JSON_EXAMPLE).unwrap();
+        let path = FieldPath::new("age[2]");
+        assert_eq!(lookup_field(&path, &doc),
+            Err("Indexed non-array .age".to_string()));
+    }
+
+    #[test]
+    fn test_bad_lookup_array_index_oob() {
+        let doc: Value = serde_json::from_str(JSON_EXAMPLE).unwrap();
+        let path = FieldPath::new("phones[2]");
+        assert_eq!(lookup_field(&path, &doc),
+            Err("Array index 2 out of bounds for .phones".to_string()));
+    }
+
+    #[test]
+    fn test_bad_lookup_unknown_field() {
+        let doc: Value = serde_json::from_str(JSON_EXAMPLE).unwrap();
+        let path = FieldPath::new("ssn");
+        assert_eq!(lookup_field(&path, &doc),
+            Err("Unknown field ssn".to_string()));
+    }
+
+    #[test]
+    fn test_bad_lookup_not_object() {
+        let doc: Value = serde_json::from_str(JSON_EXAMPLE).unwrap();
+        let path = FieldPath::new("age.month");
+        assert_eq!(lookup_field(&path, &doc),
+            Err("Attempt to access field month on non-object".to_string()));
+    }
+
+    #[test]
+    #[ignore = "Need to implement checking"]
+    fn field_path_invalid_characters() {
+        let _path = FieldPath::new("age.$month");
+    }
+
+    #[test]
+    #[ignore = "Need to implement checking"]
+    fn field_path_invalid_index() {
+        let _path = FieldPath::new("age[%%]");
     }
 }
