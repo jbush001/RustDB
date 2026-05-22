@@ -24,10 +24,10 @@
 
 use crate::page_cache::*;
 use crate::util::*;
+use crate::superblock::*;
 
-const FREE_LIST_HEAD_OFFS: usize = 4;
-const FILE_SIZE_OFFS: usize = 4;
 const FREE_LIST_END: u64 = 0; // Since page 0 is the superblock, can't be freed.
+const DEFAULT_FIRST_FREE_PAGE: u64 = 1;
 
 pub struct PageAllocator {
     page_cache: PageCache,
@@ -37,15 +37,14 @@ pub struct PageAllocator {
 
 impl PageAllocator {
     pub fn new(page_cache: &PageCache) -> Self {
-        let page = page_cache.lock_page(FilePageId(0));
-        let next_frontier = std::cmp::max(get_u64(&page, FILE_SIZE_OFFS), 1);
-        let free_list_head = get_u64(&page, FREE_LIST_HEAD_OFFS);
+        let page = page_cache.lock_page(SUPERBLOCK_FPID);
+        let superblock = get_superblock(&page);
 
         let page_cache = page_cache.clone();
         PageAllocator {
             page_cache,
-            next_frontier,
-            free_list_head
+            next_frontier: std::cmp::max(superblock.file_size, DEFAULT_FIRST_FREE_PAGE),
+            free_list_head: superblock.free_list_head
         }
     }
 
@@ -58,16 +57,18 @@ impl PageAllocator {
                 self.free_list_head = get_u64(&page, 0);
             }
 
-            let mut page = self.page_cache.lock_page_mut(FilePageId(0));
-            set_u64(&mut page, FREE_LIST_HEAD_OFFS, self.free_list_head);
+            let mut page = self.page_cache.lock_page_mut(SUPERBLOCK_FPID);
+            let superblock = get_superblock_mut(&mut page);
+            superblock.free_list_head = self.free_list_head;
 
             result
         } else {
             // Carve off frontier
             let result = self.next_frontier;
             self.next_frontier += 1;
-            let mut page = self.page_cache.lock_page_mut(FilePageId(0));
-            set_u64(&mut page, FILE_SIZE_OFFS, self.next_frontier);
+            let mut page = self.page_cache.lock_page_mut(SUPERBLOCK_FPID);
+            let superblock = get_superblock_mut(&mut page);
+            superblock.file_size = self.next_frontier;
 
             result
         }
@@ -80,8 +81,9 @@ impl PageAllocator {
             self.free_list_head = fpid;
         }
 
-        let mut page = self.page_cache.lock_page_mut(FilePageId(0));
-        set_u64(&mut page, FREE_LIST_HEAD_OFFS, self.free_list_head);
+        let mut page = self.page_cache.lock_page_mut(SUPERBLOCK_FPID);
+        let superblock = get_superblock_mut(&mut page);
+        superblock.free_list_head = self.free_list_head;
     }
 }
 

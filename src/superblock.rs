@@ -14,26 +14,23 @@
 //   limitations under the License.
 //
 
-mod btree;
-mod page_cache;
-mod util;
-mod page_allocator;
-mod file_store;
-mod record_array;
-mod mocks;
-mod collection;
-mod superblock;
-
-use std::rc::Rc;
-use std::cell::RefCell;
-use crate::file_store::{FileStore};
+use bytemuck::{Pod, Zeroable};
 use crate::page_cache::*;
-use crate::page_allocator::*;
+use std::mem;
 
-fn main() {
-    let file_store: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(FileStore::open("main.db").unwrap()));
-    let page_cache = PageCache::new(1000, Rc::clone(&file_store));
-    let mut allocator = PageAllocator::new(&page_cache);
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct Superblock {
+    pub free_list_head: u64,
+    pub file_size: u64
+}
 
-    allocator.alloc();
+pub const SUPERBLOCK_FPID: FilePageId = FilePageId(0);
+
+pub fn get_superblock(page_guard: &PageGuard) -> &Superblock {
+    bytemuck::from_bytes(&page_guard[0..mem::size_of::<Superblock>()])
+}
+
+pub fn get_superblock_mut(page_guard: &mut PageGuardMut) -> &mut Superblock {
+    bytemuck::from_bytes_mut(&mut page_guard[0..mem::size_of::<Superblock>()])
 }
