@@ -27,7 +27,6 @@ use crate::util::*;
 use crate::superblock::*;
 
 const FREE_LIST_END: u64 = 0; // Since page 0 is the superblock, can't be freed.
-const DEFAULT_FIRST_FREE_PAGE: u64 = 1;
 
 pub struct PageAllocator {
     page_cache: PageCache,
@@ -40,10 +39,12 @@ impl PageAllocator {
         let page = page_cache.lock_page(SUPERBLOCK_FPID);
         let superblock = get_superblock(&page);
 
+        assert!(superblock.file_size > 0);
+
         let page_cache = page_cache.clone();
         PageAllocator {
             page_cache,
-            next_frontier: std::cmp::max(superblock.file_size, DEFAULT_FIRST_FREE_PAGE),
+            next_frontier: superblock.file_size,
             free_list_head: superblock.free_list_head
         }
     }
@@ -94,12 +95,19 @@ mod tests {
     use crate::page_cache::*;
     use more_asserts::{assert_gt};
     use crate::mocks::{MockPersistentStore};
+    use crate::superblock::*;
     use super::*;
 
     #[test]
     fn test_page_allocator() {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
         let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
+
+        {
+            let mut page = page_cache.lock_page_mut(SUPERBLOCK_FPID);
+            init_superblock(&mut page);
+        }
+
         let mut allocator = PageAllocator::new(&mut page_cache);
 
         // Allocate two frontier blocks

@@ -27,6 +27,12 @@ pub struct Superblock {
 
 pub const SUPERBLOCK_FPID: FilePageId = FilePageId(0);
 
+pub fn init_superblock(page_guard: &mut PageGuardMut) {
+    let block = get_superblock_mut(page_guard);
+    block.free_list_head = 0;
+    block.file_size = 1;
+}
+
 pub fn get_superblock(page_guard: &PageGuard) -> &Superblock {
     bytemuck::from_bytes(&page_guard[0..mem::size_of::<Superblock>()])
 }

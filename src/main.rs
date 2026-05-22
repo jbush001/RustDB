@@ -31,6 +31,7 @@ use crate::page_cache::*;
 use crate::page_allocator::*;
 
 fn main() {
+    // TODO need to check if main.db exists, create if if not
     let file_store: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(FileStore::open("main.db").unwrap()));
     let page_cache = PageCache::new(1000, Rc::clone(&file_store));
     let mut allocator = PageAllocator::new(&page_cache);

@@ -458,6 +458,7 @@ mod tests {
     use std::cell::RefCell;
     use crate::page_cache::*;
     use crate::mocks::{MockPersistentStore};
+    use crate::superblock::*;
     use super::*;
 
     fn sanity_check_node(node: &[u8]) {
@@ -683,6 +684,11 @@ mod tests {
         let mock_io: Rc<RefCell<dyn PersistentStore>> =
             Rc::new(RefCell::new(MockPersistentStore::default()));
         let mut page_cache = PageCache::new(50, Rc::clone(&mock_io));
+        {
+            let mut page = page_cache.lock_page_mut(SUPERBLOCK_FPID);
+            init_superblock(&mut page);
+        }
+
         let mut allocator = PageAllocator::new(&mut page_cache);
 
         let root_page = allocator.alloc();

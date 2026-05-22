@@ -65,6 +65,7 @@ mod tests {
     use crate::mocks::{MockPersistentStore};
     use serde_json::{Value, json};
     use crate::btree::*;
+    use crate::superblock::*;
     use super::*;
 
     fn create_document(index: usize) -> Value {
@@ -78,6 +79,11 @@ mod tests {
     fn test_insert() {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
         let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
+        {
+            let mut page = page_cache.lock_page_mut(SUPERBLOCK_FPID);
+            init_superblock(&mut page);
+        }
+
         let mut allocator = PageAllocator::new(&mut page_cache);
         let document_btree_root = allocator.alloc();
         {
