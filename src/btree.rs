@@ -87,7 +87,7 @@ impl Iterator for BTreeCursor {
 pub fn btree_iterate(root_node_fpid: u64, reverse: bool, page_cache: &PageCache) -> BTreeCursor {
     let mut current_node_fpid = root_node_fpid;
     loop {
-        let page = page_cache.lock_page_mut(FilePageId(current_node_fpid));
+        let page = page_cache.lock_page(FilePageId(current_node_fpid));
         let current_index = if reverse { record_array::get_num_entries(&page) - 1 } else { 0 };
         if is_leaf(&page) {
             return BTreeCursor {
@@ -111,7 +111,7 @@ pub fn btree_iterate(root_node_fpid: u64, reverse: bool, page_cache: &PageCache)
 pub fn btree_find(root_node_fpid: u64, key: &[u8], reverse: bool, page_cache: &PageCache) -> BTreeCursor {
     let mut current_node_fpid = root_node_fpid;
     loop {
-        let page = page_cache.lock_page_mut(FilePageId(current_node_fpid));
+        let page = page_cache.lock_page(FilePageId(current_node_fpid));
         let index = find_key(&page, key);
         if is_leaf(&page) {
             if (reverse && index == 0) || (index == record_array::get_num_entries(&page)) {
@@ -153,7 +153,7 @@ pub fn btree_insert(root_node_fpid: u64,
 
     loop {
         path.push(current_node_fpid);
-        let page = page_cache.lock_page_mut(FilePageId(current_node_fpid));
+        let page = page_cache.lock_page(FilePageId(current_node_fpid));
         if is_leaf(&page) {
             break;
         }
@@ -287,7 +287,7 @@ fn print_btree(root_node_fpid: u64, page_cache: &PageCache) {
     fifo.push(root_node_fpid);
     while !fifo.is_empty() {
         let next = fifo.remove(0);
-        let page = page_cache.lock_page_mut(FilePageId(next));
+        let page = page_cache.lock_page(FilePageId(next));
         print_node(&page);
         if !is_leaf(&page) {
             let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
