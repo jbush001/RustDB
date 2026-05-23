@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn test_index() {
+    fn test_index_int() {
         let (mut page_cache, mut allocator, mut collection) = create_collection();
 
         collection.create_index(&FieldPath::new("age"), &mut page_cache, &mut allocator);
@@ -301,6 +301,90 @@ mod tests {
     }
 
     #[test]
+    fn test_index_string() {
+        let (mut page_cache, mut allocator, mut collection) = create_collection();
+
+        collection.create_index(&FieldPath::new("item"), &mut page_cache, &mut allocator);
+
+        let doc1 = serde_json::from_str(r#"{"item": "Eggs", "cost": 6.79}"#).unwrap();
+        let docid1 = collection.insert_document(&doc1, &mut page_cache, &mut allocator);
+        let doc2 = serde_json::from_str(r#"{"item": "Whole Wheat Bread", "cost": 5.30}"#).unwrap();
+        let docid2 = collection.insert_document(&doc2, &mut page_cache, &mut allocator);
+        let doc3 = serde_json::from_str(r#"{"item": "Peanut Butter", "cost": 8.05}"#).unwrap();
+        let docid3 = collection.insert_document(&doc3, &mut page_cache, &mut allocator);
+        let doc4 = serde_json::from_str(r#"{"item": "Dom Perignon", "cost": 250.99}"#).unwrap();
+        let docid4 = collection.insert_document(&doc4, &mut page_cache, &mut allocator);
+
+        let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
+        let Some((_key1, val1)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(u64::from_le_bytes(val1.try_into().unwrap()), docid4.0);
+        let Some((_key2, val2)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(u64::from_le_bytes(val2.try_into().unwrap()), docid1.0);
+        let Some((_key3, val3)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(u64::from_le_bytes(val3.try_into().unwrap()), docid3.0);
+        let Some((_key4, val4)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(u64::from_le_bytes(val4.try_into().unwrap()), docid2.0);
+
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_index_float() {
+        let (mut page_cache, mut allocator, mut collection) = create_collection();
+
+        collection.create_index(&FieldPath::new("profit"), &mut page_cache, &mut allocator);
+
+        let doc1 = serde_json::from_str(r#"{"profit": 8.79}"#).unwrap();
+        let docid1 = collection.insert_document(&doc1, &mut page_cache, &mut allocator);
+        let doc2 = serde_json::from_str(r#"{"profit": -20.7}"#).unwrap();
+        let docid2 = collection.insert_document(&doc2, &mut page_cache, &mut allocator);
+        let doc3 = serde_json::from_str(r#"{"profit": -44.3}"#).unwrap();
+        let docid3 = collection.insert_document(&doc3, &mut page_cache, &mut allocator);
+        let doc4 = serde_json::from_str(r#"{"profit": 5.33}"#).unwrap();
+        let docid4 = collection.insert_document(&doc4, &mut page_cache, &mut allocator);
+
+        let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
+        let Some((_key1, val1)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(u64::from_le_bytes(val1.try_into().unwrap()), docid3.0);
+        let Some((_key2, val2)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(u64::from_le_bytes(val2.try_into().unwrap()), docid2.0);
+        let Some((_key3, val3)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(u64::from_le_bytes(val3.try_into().unwrap()), docid4.0);
+        let Some((_key4, val4)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(u64::from_le_bytes(val4.try_into().unwrap()), docid1.0);
+
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_index_bool() {
+        let (mut page_cache, mut allocator, mut collection) = create_collection();
+
+        collection.create_index(&FieldPath::new("instock"), &mut page_cache, &mut allocator);
+
+        let doc1 = serde_json::from_str(r#"{"item": "Eggs", "instock": true}"#).unwrap();
+        collection.insert_document(&doc1, &mut page_cache, &mut allocator);
+        let doc2 = serde_json::from_str(r#"{"item": "Whole Wheat Bread", "instock":false}"#).unwrap();
+        collection.insert_document(&doc2, &mut page_cache, &mut allocator);
+        let doc3 = serde_json::from_str(r#"{"item": "Peanut Butter", "instock": true}"#).unwrap();
+        collection.insert_document(&doc3, &mut page_cache, &mut allocator);
+        let doc4 = serde_json::from_str(r#"{"item": "Dom Perignon", "instock": false}"#).unwrap();
+        collection.insert_document(&doc4, &mut page_cache, &mut allocator);
+
+        let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
+        let Some((key1, _val1)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(key1[0], 0);
+        let Some((key2, _val2)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(key2[0], 0);
+        let Some((key3, _val3)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(key3[0], 1);
+        let Some((key4, _val4)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(key4[0], 1);
+
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
     fn test_index_missing_key() {
         // If we set up an index and that field is not present in a document,
         // we'll silently skip adding it to the index.
@@ -321,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn test_index_array_key() {
+    fn test_index_ignore_array_key() {
         let (mut page_cache, mut allocator, mut collection) = create_collection();
         collection.create_index(&FieldPath::new("age"), &mut page_cache, &mut allocator);
 
@@ -338,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn test_index_object_key() {
+    fn test_index_ignore_object_key() {
         let (mut page_cache, mut allocator, mut collection) = create_collection();
         collection.create_index(&FieldPath::new("age"), &mut page_cache, &mut allocator);
 
