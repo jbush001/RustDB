@@ -19,6 +19,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::any::Any;
 use std::ops::{Deref, DerefMut};
+use crate::util::*;
 
 pub const PAGE_SIZE: usize = 4096;
 
@@ -27,76 +28,6 @@ pub struct FilePageId(pub u64);
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub struct CachePageId(pub usize);
-
-struct LRUEvictionPolicy {
-    next: Vec<Option<CachePageId>>,
-    prev: Vec<Option<CachePageId>>,
-    head: Option<CachePageId>,
-    tail: Option<CachePageId>
-}
-
-impl LRUEvictionPolicy {
-    fn new(num_pages: usize) -> Self {
-        Self {
-            next: vec![None; num_pages],
-            prev: vec![None; num_pages],
-            head: None,
-            tail: None,
-        }
-    }
-
-    fn remove(&mut self, id: CachePageId) {
-        match self.next[id.0] {
-            Some(next_id) => {
-                assert!(self.tail != Some(id));
-                self.prev[next_id.0] = self.prev[id.0];
-            }
-            None => {
-                assert!(self.tail.unwrap() == id);
-                self.tail = self.prev[id.0];
-            }
-        }
-
-        match self.prev[id.0] {
-            Some(prev_id) => {
-                assert!(self.head != Some(id));
-                self.next[prev_id.0] = self.next[id.0];
-            }
-            None => {
-                assert!(self.head.unwrap() == id);
-                self.head = self.next[id.0];
-            }
-        }
-    }
-
-    fn insert(&mut self, id: CachePageId) {
-        match self.head {
-            Some(head) => {
-                self.prev[head.0] = Some(id);
-                self.next[id.0] = Some(head);
-                self.head = Some(id);
-                self.prev[id.0] = None;
-            }
-
-            None => {
-                self.head = Some(id);
-                self.tail = Some(id);
-                self.next[id.0] = None;
-                self.prev[id.0] = None;
-            }
-        }
-    }
-
-    fn evict(&mut self) -> Option<CachePageId> {
-        match self.tail {
-            Some(id) => {
-                self.remove(id);
-                Some(id)
-            }
-            None => None
-        }
-    }
-}
 
 pub trait PersistentStore: Any {
     fn read(&mut self, offset: u64, slice: &mut [u8]);
@@ -231,7 +162,7 @@ impl Journal {
 struct PageCacheInner {
     page_map: HashMap<FilePageId, CachePageId>,
     pages: Vec<CachedPage>,
-    eviction_policy: LRUEvictionPolicy,
+    lru: IndexLru,
     persistent_store: Rc<RefCell<dyn PersistentStore>>,
     transaction_active: bool,
     dirty_page_list: Vec<CachePageId>,
@@ -240,15 +171,15 @@ struct PageCacheInner {
 
 impl PageCacheInner {
     fn new(size: usize, persistent_store: Rc<RefCell<dyn PersistentStore>>) -> Self {
-        let mut eviction_policy = LRUEvictionPolicy::new(size);
+        let mut lru = IndexLru::new(size);
         for i in 0..size {
-            eviction_policy.insert(CachePageId(i));
+            lru.push_head(i);
         }
 
         PageCacheInner {
             page_map: HashMap::new(),
             pages: vec![CachedPage{file_page: None, ref_count: 0, dirty: false, data: Box::new([0u8; PAGE_SIZE])}; size],
-            eviction_policy,
+            lru,
             persistent_store,
             transaction_active: false,
             dirty_page_list: Vec::new(),
@@ -268,7 +199,7 @@ impl PageCacheInner {
                 if cp.ref_count == 0 && !cp.dirty {
                     // Remove from the LRU while the page is locked (it can't be
                     // evicted).
-                    self.eviction_policy.remove(cpid);
+                    self.lru.remove(cpid.0);
                 }
 
                 cp.ref_count += 1;
@@ -276,16 +207,16 @@ impl PageCacheInner {
             },
             None => {
                 // This data is not resident, find an unused page and recycle it
-                match self.eviction_policy.evict() {
-                    Some(cpid) => {
+                match self.lru.pop_tail() {
+                    Some(index) => {
                         // The cache is write-through, so we never have dirty pages
                         // sitting around.
-                        let cp = &mut self.pages[cpid.0];
+                        let cp = &mut self.pages[index];
                         match cp.file_page {
                             Some(fpid) => self.page_map.remove(&fpid),
                             None => None // this page has never been loaded, nothing to remove
                         };
-                        self.page_map.insert(fpid, cpid);
+                        self.page_map.insert(fpid, CachePageId(index));
                         cp.file_page = Some(fpid);
                         cp.ref_count = 1;
                         cp.dirty = writable;
@@ -293,9 +224,9 @@ impl PageCacheInner {
                         // Read data into page
                         let file_offset = fpid.0 * PAGE_SIZE as u64;
                         self.persistent_store.borrow_mut().read(file_offset,
-                            &mut *self.pages[cpid.0].data);
+                            &mut *self.pages[index].data);
 
-                        cpid
+                        CachePageId(index)
                     }
 
                     None => panic!("cache full!")
@@ -317,7 +248,7 @@ impl PageCacheInner {
             }
         } else if self.pages[cpid.0].ref_count == 0 {
             // Put back in LRU
-            self.eviction_policy.insert(cpid);
+            self.lru.push_head(cpid.0);
         }
     }
 
@@ -349,7 +280,7 @@ impl PageCacheInner {
             let file_offset = cached_page.file_page.unwrap().0 * PAGE_SIZE as u64;
             store.write(file_offset, &*self.pages[cpid.0].data);
             self.pages[cpid.0].dirty = false;
-            self.eviction_policy.insert(cpid.clone());
+            self.lru.push_head(cpid.0);
         }
 
         self.dirty_page_list.clear();
@@ -427,190 +358,6 @@ mod tests {
         f(borrowed.as_any_mut().downcast_mut::<MockIOChecker>().unwrap());
     }
 
-    fn sanity_check_lru(lru: &LRUEvictionPolicy) {
-        // You can't have a valid head pointer with valid tail and vice versa
-        assert_eq!(lru.head.is_some(), lru.tail.is_some(), "Head/tail asymmetry");
-        if lru.head.is_none() {
-            return;
-        }
-
-        assert_eq!(lru.next.len(), lru.prev.len(), "Array size mismatch");
-
-        // Forward traversal
-        let mut node = lru.head;
-        let mut forward_len: usize = 0;
-        while let Some(_id) = node {
-            forward_len += 1;
-            assert!(forward_len <= lru.next.len(), "Cycle in next pointers");
-
-            if lru.next[node.unwrap().0 as usize].is_none() {
-                assert_eq!(node, lru.tail, "Forward traversal terminated early: not at tail");
-                break;
-            } else {
-                node = lru.next[node.unwrap().0 as usize];
-            }
-        }
-
-        // Backward traversal
-        let mut node = lru.tail;
-        let mut reverse_len: usize = 0;
-        while let Some(_id) = node {
-            reverse_len += 1;
-            assert!(reverse_len <= lru.prev.len(), "Cycle in prev pointers");
-
-            if lru.prev[node.unwrap().0 as usize].is_none() {
-                assert_eq!(node, lru.head, "Backward traversal terminated early: not at head");
-                break;
-            } else {
-                node = lru.prev[node.unwrap().0 as usize];
-            }
-        }
-    }
-
-    // Test that our validation tests catch bad lists
-    #[test]
-    #[should_panic = "Head/tail asymmetry"]
-    fn test_head_tail_assym1() {
-        sanity_check_lru(&LRUEvictionPolicy {
-            next: vec![Some(CachePageId(1)), None],
-            prev: vec![None, Some(CachePageId(0))],
-            head: Some(CachePageId(0)),
-            tail: None
-        })
-    }
-
-    #[test]
-    #[should_panic = "Head/tail asymmetry"]
-    fn test_head_tail_assym2() {
-        sanity_check_lru(&LRUEvictionPolicy {
-            next: vec![Some(CachePageId(1)), None],
-            prev: vec![None, Some(CachePageId(0))],
-            head: None,
-            tail: Some(CachePageId(0))
-        })
-    }
-
-    #[test]
-    #[should_panic = "Array size mismatch"]
-    fn test_array_size_mismatch() {
-        sanity_check_lru(&LRUEvictionPolicy {
-            next: vec![Some(CachePageId(1)), None],
-            prev: vec![Some(CachePageId(0))],
-            head: Some(CachePageId(1)),
-            tail: Some(CachePageId(0))
-        })
-    }
-
-    #[test]
-    #[should_panic = "Cycle in next pointers"]
-    fn test_next_cycle() {
-        sanity_check_lru(&LRUEvictionPolicy {
-            next: vec![Some(CachePageId(1)), Some(CachePageId(1))],
-            prev: vec![None, Some(CachePageId(0))],
-            head: Some(CachePageId(0)),
-            tail: Some(CachePageId(1))
-        })
-    }
-
-    #[test]
-    #[should_panic = "Cycle in prev pointers"]
-    fn test_prev_cycle() {
-        sanity_check_lru(&LRUEvictionPolicy {
-            next: vec![Some(CachePageId(1)), None],
-            prev: vec![Some(CachePageId(0)), Some(CachePageId(0))],
-            head: Some(CachePageId(0)),
-            tail: Some(CachePageId(1))
-        })
-    }
-
-    #[test]
-    #[should_panic = "Forward traversal terminated early: not at tail"]
-    fn test_array_tail_bad() {
-        sanity_check_lru(&LRUEvictionPolicy {
-            next: vec![Some(CachePageId(1)), None, None],
-            prev: vec![None, Some(CachePageId(0)), Some(CachePageId(1))],
-            head: Some(CachePageId(0)),
-            tail: Some(CachePageId(2))
-        })
-    }
-
-    #[test]
-    #[should_panic = "Backward traversal terminated early: not at head"]
-    fn test_array_head_bad() {
-        sanity_check_lru(&LRUEvictionPolicy {
-            next: vec![Some(CachePageId(1)), Some(CachePageId(2)), None],
-            prev: vec![None, None, Some(CachePageId(1))],
-            head: Some(CachePageId(0)),
-            tail: Some(CachePageId(2))
-        })
-    }
-
-    // Eviction policy tests
-    #[test]
-    fn test_ep_evict_empty() {
-        let mut policy = LRUEvictionPolicy::new(10);
-        sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), None);
-    }
-
-    #[test]
-    fn test_ep_evict_one() {
-        let mut policy = LRUEvictionPolicy::new(10);
-        policy.insert(CachePageId(1));
-        sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), Some(CachePageId(1)));
-        assert_eq!(policy.evict(), None);
-    }
-
-    #[test]
-    fn test_ep_evict_many() {
-        let mut policy = LRUEvictionPolicy::new(10);
-        policy.insert(CachePageId(1));
-        policy.insert(CachePageId(2));
-        policy.insert(CachePageId(3));
-        policy.insert(CachePageId(4));
-        sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), Some(CachePageId(1)));
-        sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), Some(CachePageId(2)));
-        sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), Some(CachePageId(3)));
-        sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), Some(CachePageId(4)));
-        sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), None);
-        sanity_check_lru(&policy);
-    }
-
-    #[test]
-    fn test_ep_insert_remove() {
-        let mut policy = LRUEvictionPolicy::new(10);
-        policy.insert(CachePageId(1));
-        policy.insert(CachePageId(2));
-        policy.insert(CachePageId(3));
-        policy.remove(CachePageId(2));
-        sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), Some(CachePageId(1)));
-        assert_eq!(policy.evict(), Some(CachePageId(3)));
-        sanity_check_lru(&policy);
-    }
-
-    // Regression test
-    #[test]
-    fn test_ep_remove_head() {
-        let mut policy = LRUEvictionPolicy::new(10);
-        policy.insert(CachePageId(1));
-        sanity_check_lru(&policy);
-        policy.insert(CachePageId(2));
-        sanity_check_lru(&policy);
-        policy.remove(CachePageId(2));
-        sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), Some(CachePageId(1)));
-        sanity_check_lru(&policy);
-        assert_eq!(policy.evict(), None);
-        sanity_check_lru(&policy);
-    }
-
     fn setup_cache(capacity: usize) -> (Rc<RefCell<dyn PersistentStore>>, PageCache) {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockIOChecker::default()));
         let page_cache = PageCache::new(capacity, Rc::clone(&mock_io));
@@ -665,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pc_evict() {
+    fn test_pc_pop_tail() {
         let (mock_io, page_cache) = setup_cache(5);
 
         page_cache.lock_page(FilePageId(3));
