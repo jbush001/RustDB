@@ -101,6 +101,7 @@ impl LRUEvictionPolicy {
 pub trait PersistentStore: Any {
     fn read(&mut self, offset: u64, slice: &mut [u8]);
     fn write(&mut self, offset: u64, slice: &[u8]);
+    fn sync(&mut self);
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -157,6 +158,17 @@ impl DerefMut for PageGuardMut {
     }
 }
 
+pub struct TransactionGuard {
+    cache: Rc<RefCell<PageCacheInner>>,
+}
+
+impl Drop for TransactionGuard {
+    fn drop(&mut self) {
+        self.cache.borrow_mut().end_transaction();
+    }
+}
+
+
 #[derive(Clone)]
 pub struct PageCache {
     inner: Rc<RefCell<PageCacheInner>>
@@ -191,13 +203,39 @@ impl PageCache {
             cache: Rc::clone(&self.inner)
         }
     }
+
+    pub fn begin_transaction(&self) -> TransactionGuard {
+        let mut inner = self.inner.borrow_mut();
+        inner.begin_transaction();
+
+        TransactionGuard {
+            cache: Rc::clone(&self.inner)
+        }
+    }
+}
+
+struct Journal {
+}
+
+impl Journal {
+    fn log_page_write(&self, _fpid: FilePageId, _data: &[u8]) {
+    }
+
+    fn committed(&self) {
+    }
+
+    fn replay(&self) {
+    }
 }
 
 struct PageCacheInner {
     page_map: HashMap<FilePageId, CachePageId>,
     pages: Vec<CachedPage>,
     eviction_policy: LRUEvictionPolicy,
-    persistent_store: Rc<RefCell<dyn PersistentStore>>
+    persistent_store: Rc<RefCell<dyn PersistentStore>>,
+    transaction_active: bool,
+    dirty_page_list: Vec<CachePageId>,
+    journal: Journal
 }
 
 impl PageCacheInner {
@@ -211,18 +249,23 @@ impl PageCacheInner {
             page_map: HashMap::new(),
             pages: vec![CachedPage{file_page: None, ref_count: 0, dirty: false, data: Box::new([0u8; PAGE_SIZE])}; size],
             eviction_policy,
-            persistent_store
+            persistent_store,
+            transaction_active: false,
+            dirty_page_list: Vec::new(),
+            journal: Journal {}
         }
     }
 
     fn lock_page_internal(&mut self, fpid: FilePageId, writable: bool) -> CachePageId {
+        assert!(!writable || self.transaction_active);
+
         let entry = self.page_map.get(&fpid);
         match entry {
             Some(cpid) => {
                 // This page is already cached, return it.
                 let cpid = *cpid;
                 let cp = &mut self.pages[cpid.0];
-                if cp.ref_count == 0 {
+                if cp.ref_count == 0 && !cp.dirty {
                     // Remove from the LRU while the page is locked (it can't be
                     // evicted).
                     self.eviction_policy.remove(cpid);
@@ -263,19 +306,53 @@ impl PageCacheInner {
 
     fn unlock_page(&mut self, cpid: CachePageId) {
         let cp = &mut self.pages[cpid.0];
+        assert!(!cp.dirty || self.transaction_active);
         cp.ref_count -= 1;
         if cp.dirty {
-            // Write to backing store
-            let file_offset = cp.file_page.unwrap().0 * PAGE_SIZE as u64;
-            self.persistent_store.borrow_mut().write(file_offset,
-                &*self.pages[cpid.0].data);
-            self.pages[cpid.0].dirty = false;
-        }
-
-        if self.pages[cpid.0].ref_count == 0 {
+            self.dirty_page_list.push(cpid);
+        } else if self.pages[cpid.0].ref_count == 0 {
             // Put back in LRU
             self.eviction_policy.insert(cpid);
         }
+    }
+
+    fn begin_transaction(&mut self) {
+        assert!(!self.transaction_active);
+        self.transaction_active = true;
+    }
+
+    fn end_transaction(&mut self) {
+        assert!(self.transaction_active);
+
+        let mut store = self.persistent_store.borrow_mut();
+
+        // Write to journal
+        for cpid in &self.dirty_page_list {
+            let cached_page = &mut self.pages[cpid.0];
+            assert!(cached_page.ref_count == 0);
+            self.journal.log_page_write(cached_page.file_page.unwrap(), &cached_page.data[..]);
+
+            // TODO write to circular buffer
+
+        }
+
+        store.sync();
+
+        // Write to backing store.
+        for cpid in &self.dirty_page_list {
+            let cached_page = &mut self.pages[cpid.0];
+            let file_offset = cached_page.file_page.unwrap().0 * PAGE_SIZE as u64;
+            store.write(file_offset, &*self.pages[cpid.0].data);
+            self.pages[cpid.0].dirty = false;
+            self.eviction_policy.insert(cpid.clone());
+        }
+
+        self.dirty_page_list.clear();
+        self.transaction_active = false;
+
+        store.sync();
+
+        self.journal.committed();
     }
 }
 
@@ -321,6 +398,8 @@ mod tests {
             self.write_address = offset;
             self.write_data = slice[0];
         }
+
+        fn sync(&mut self) {}
 
         fn as_any(&self) -> &dyn Any {
             self
@@ -616,8 +695,10 @@ mod tests {
 
         const WRITE_VAL: u8 = 0x55;
 
-        // Read a page, set the wriable bit
         {
+            let _transaction = page_cache.begin_transaction();
+
+            // Read a page, set the wriable bit
             let mut guard = page_cache.lock_page_mut(FilePageId(3));
             (*guard)[0] = WRITE_VAL;
         }
@@ -637,6 +718,7 @@ mod tests {
     fn test_cache_full() {
         let (_mock_io, page_cache) = setup_cache(5);
 
+        let _transaction = page_cache.begin_transaction();
         let _guard1 = page_cache.lock_page_mut(FilePageId(0));
         let _guard2 = page_cache.lock_page_mut(FilePageId(1));
         let _guard3 = page_cache.lock_page_mut(FilePageId(2));

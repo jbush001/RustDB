@@ -102,6 +102,7 @@ mod tests {
     fn test_page_allocator() {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
         let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
+        let _transaction = page_cache.begin_transaction();
 
         {
             let mut page = page_cache.lock_page_mut(SUPERBLOCK_FPID);

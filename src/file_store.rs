@@ -66,6 +66,10 @@ impl PersistentStore for FileStore {
         self.length = std::cmp::max(self.length, offset + slice.len() as u64);
     }
 
+    fn sync(&mut self) {
+        let _ = self.file.sync_data();
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -97,6 +101,19 @@ mod tests {
 
         let content = fs::read_to_string(file.path().to_str().unwrap()).unwrap();
         assert_eq!(content, "abcdefghiklm-!@#$%^&*()yz0123456789");
+    }
+
+    #[test]
+    fn test_sync() {
+        let file = NamedTempFile::new().unwrap();
+        let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
+
+        store.write(0, &"abcdefgh".as_bytes());
+        store.sync();
+
+        let mut buf: [u8; 8] = [0; 8];
+        store.read(0, &mut buf);
+        assert_eq!(buf, "abcdefgh".as_bytes());
     }
 
     #[test]

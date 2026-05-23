@@ -693,6 +693,8 @@ mod tests {
         let mock_io: Rc<RefCell<dyn PersistentStore>> =
             Rc::new(RefCell::new(MockPersistentStore::default()));
         let mut page_cache = PageCache::new(50, Rc::clone(&mock_io));
+        let _transaction = page_cache.begin_transaction();
+
         {
             let mut page = page_cache.lock_page_mut(SUPERBLOCK_FPID);
             init_superblock(&mut page);
@@ -791,18 +793,21 @@ mod tests {
     fn test_btree_find_duplicate_key() {
         let (page_cache, mut allocator, root_page) = build_btree(0);
 
-        btree_insert(root_page, "aardvark".as_bytes(), &[0u8], &page_cache, &mut allocator);
-        btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
-        btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
-        btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
-        btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
-        btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
-        btree_insert(root_page, "banana".as_bytes(), &[0u8], &page_cache, &mut allocator);
-        btree_insert(root_page, "crayon".as_bytes(), &[0u8], &page_cache, &mut allocator);
-        btree_insert(root_page, "domino".as_bytes(), &[0u8], &page_cache, &mut allocator);
-        btree_insert(root_page, "elephant".as_bytes(), &[0u8], &page_cache, &mut allocator);
-        btree_insert(root_page, "fish".as_bytes(), &[0u8], &page_cache, &mut allocator);
-        btree_insert(root_page, "grass".as_bytes(), &[0u8], &page_cache, &mut allocator);
+        {
+            let _transaction = page_cache.begin_transaction();
+            btree_insert(root_page, "aardvark".as_bytes(), &[0u8], &page_cache, &mut allocator);
+            btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
+            btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
+            btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
+            btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
+            btree_insert(root_page, "apple".as_bytes(), &[0u8], &page_cache, &mut allocator);
+            btree_insert(root_page, "banana".as_bytes(), &[0u8], &page_cache, &mut allocator);
+            btree_insert(root_page, "crayon".as_bytes(), &[0u8], &page_cache, &mut allocator);
+            btree_insert(root_page, "domino".as_bytes(), &[0u8], &page_cache, &mut allocator);
+            btree_insert(root_page, "elephant".as_bytes(), &[0u8], &page_cache, &mut allocator);
+            btree_insert(root_page, "fish".as_bytes(), &[0u8], &page_cache, &mut allocator);
+            btree_insert(root_page, "grass".as_bytes(), &[0u8], &page_cache, &mut allocator);
+        }
         let mut cursor = btree_find(root_page, "apple".as_bytes(), false, &page_cache);
         for _ in 0..5 {
             let (key, _) = cursor.next().expect("cursor didn't return value");
@@ -816,7 +821,10 @@ mod tests {
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
         const INDEX_TO_DELETE: usize = 37;
-        btree_delete(root_page, gen_key_for_index(INDEX_TO_DELETE).as_slice(), Some(&INDEX_TO_DELETE.to_le_bytes()), &page_cache);
+        {
+            let _transaction = page_cache.begin_transaction();
+            btree_delete(root_page, gen_key_for_index(INDEX_TO_DELETE).as_slice(), Some(&INDEX_TO_DELETE.to_le_bytes()), &page_cache);
+        }
 
         let mut cursor = btree_iterate(root_page, false, &page_cache);
         for i in 0..NUM_ENTRIES {
@@ -838,11 +846,15 @@ mod tests {
         const NUM_ENTRIES: usize = 103;
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
 
-        // Key is bogus
-        btree_delete(root_page, &"yolo".as_bytes(), Some(&[0u8]), &page_cache);
+        {
+            let _transaction = page_cache.begin_transaction();
 
-        // Key is present, but value doesn't match
-        btree_delete(root_page, gen_key_for_index(10).as_slice(), Some(&[0u8]), &page_cache);
+            // Key is bogus
+            btree_delete(root_page, &"yolo".as_bytes(), Some(&[0u8]), &page_cache);
+
+            // Key is present, but value doesn't match
+            btree_delete(root_page, gen_key_for_index(10).as_slice(), Some(&[0u8]), &page_cache);
+        }
 
         let mut cursor = btree_iterate(root_page, false, &page_cache);
         for i in 0..NUM_ENTRIES {
@@ -857,10 +869,14 @@ mod tests {
     fn test_btree_delete_no_value() {
         const NUM_ENTRIES: usize = 103;
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
-
-        // No value specified
         const INDEX_TO_DELETE: usize = 10;
-        btree_delete(root_page, gen_key_for_index(INDEX_TO_DELETE).as_slice(), None, &page_cache);
+
+        {
+            let _transaction = page_cache.begin_transaction();
+
+            // No value specified
+            btree_delete(root_page, gen_key_for_index(INDEX_TO_DELETE).as_slice(), None, &page_cache);
+        }
 
         let mut cursor = btree_iterate(root_page, false, &page_cache);
         for i in 0..NUM_ENTRIES {
@@ -880,9 +896,11 @@ mod tests {
     fn test_btree_delete_all() {
         const NUM_ENTRIES: usize = 67;
         let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
-
-        for i in 0..NUM_ENTRIES {
-            btree_delete(root_page, gen_key_for_index(i).as_slice(), None, &page_cache);
+        {
+            let _transaction = page_cache.begin_transaction();
+            for i in 0..NUM_ENTRIES {
+                btree_delete(root_page, gen_key_for_index(i).as_slice(), None, &page_cache);
+            }
         }
 
         let mut cursor = btree_iterate(root_page, false, &page_cache);

@@ -226,6 +226,7 @@ mod tests {
     fn create_collection() -> (PageCache, PageAllocator, Collection) {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
         let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
+        let _transaction = page_cache.begin_transaction();
         {
             let mut page = page_cache.lock_page_mut(SUPERBLOCK_FPID);
             init_superblock(&mut page);
@@ -253,6 +254,7 @@ mod tests {
 
         let mut docids: Vec<DocID> = Vec::new();
         for i in 0..100 {
+            let _transaction = page_cache.begin_transaction();
             docids.push(collection.insert_document(&create_document(i),
                 &page_cache, &mut allocator));
         }
@@ -269,6 +271,7 @@ mod tests {
     fn test_index_int() {
         let (mut page_cache, mut allocator, mut collection) = create_collection();
 
+        let _transaction = page_cache.begin_transaction();
         collection.create_index(&FieldPath::new("age"), &mut page_cache, &mut allocator);
 
         let doc1 = serde_json::from_str(r#"{"name": "James Smith", "age": 113}"#).unwrap();
@@ -303,6 +306,7 @@ mod tests {
     #[test]
     fn test_index_string() {
         let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let _transaction = page_cache.begin_transaction();
 
         collection.create_index(&FieldPath::new("item"), &mut page_cache, &mut allocator);
 
@@ -331,7 +335,7 @@ mod tests {
     #[test]
     fn test_index_float() {
         let (mut page_cache, mut allocator, mut collection) = create_collection();
-
+        let _transaction = page_cache.begin_transaction();
         collection.create_index(&FieldPath::new("profit"), &mut page_cache, &mut allocator);
 
         let doc1 = serde_json::from_str(r#"{"profit": 8.79}"#).unwrap();
@@ -359,6 +363,7 @@ mod tests {
     #[test]
     fn test_index_bool() {
         let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let _transaction = page_cache.begin_transaction();
 
         collection.create_index(&FieldPath::new("instock"), &mut page_cache, &mut allocator);
 
@@ -389,6 +394,7 @@ mod tests {
         // If we set up an index and that field is not present in a document,
         // we'll silently skip adding it to the index.
         let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let _transaction = page_cache.begin_transaction();
 
         collection.create_index(&FieldPath::new("age"), &mut page_cache, &mut allocator);
 
@@ -407,6 +413,7 @@ mod tests {
     #[test]
     fn test_index_ignore_array_key() {
         let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let _transaction = page_cache.begin_transaction();
         collection.create_index(&FieldPath::new("age"), &mut page_cache, &mut allocator);
 
         let doc1 = serde_json::from_str(r#"{"name": "James Smith", "age": 39}"#).unwrap();
@@ -424,6 +431,8 @@ mod tests {
     #[test]
     fn test_index_ignore_object_key() {
         let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let _transaction = page_cache.begin_transaction();
+
         collection.create_index(&FieldPath::new("age"), &mut page_cache, &mut allocator);
 
         let doc1 = serde_json::from_str(r#"{"name": "James Smith", "age": 39}"#).unwrap();

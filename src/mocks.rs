@@ -50,6 +50,9 @@ impl PersistentStore for MockPersistentStore {
         self.saved_pages.insert(offset, *slice.first_chunk::<PAGE_SIZE>().unwrap());
     }
 
+    fn sync(&mut self) {
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
