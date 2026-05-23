@@ -309,7 +309,12 @@ impl PageCacheInner {
         assert!(!cp.dirty || self.transaction_active);
         cp.ref_count -= 1;
         if cp.dirty {
-            self.dirty_page_list.push(cpid);
+            // XXX hack. If the same page is relocked, ensure it gets added only
+            // once to the dirty page list. It would be more efficient to handle
+            // handle this with a clean invariant.
+            if !self.dirty_page_list.contains(&cpid) {
+                self.dirty_page_list.push(cpid);
+            }
         } else if self.pages[cpid.0].ref_count == 0 {
             // Put back in LRU
             self.eviction_policy.insert(cpid);
@@ -710,6 +715,29 @@ mod tests {
 
             // We only check the first byte, but ensure it is updated correctly.
             assert_eq!(m.write_data, WRITE_VAL);
+        });
+    }
+
+    // it's possible within a transaction we will lock the same page twice for
+    // modification. Ensure this doesn't assert.
+    #[test]
+    fn test_pc_dirty_relock() {
+        let (mock_io, page_cache) = setup_cache(5);
+        let transaction = page_cache.begin_transaction();
+        let guard1 = page_cache.lock_page_mut(FilePageId(3));
+        drop(guard1);
+        let guard2 = page_cache.lock_page_mut(FilePageId(3));
+        drop(guard2);
+
+        with_mock(&mock_io, |m| {
+            assert!(!m.write_called);
+        });
+
+        drop(transaction);
+
+        with_mock(&mock_io, |m| {
+            assert!(m.write_called);
+            assert_eq!(m.write_address, 0x3000);
         });
     }
 
