@@ -37,31 +37,29 @@ struct Collection {
 
 // Encode a key so it is lexographically sortable, since the btree
 // only deals with byte vectors
-fn encode_key(key: &Value) -> Vec<u8> {
+fn encode_key(key: &Value) -> Option<Vec<u8>> {
     match key {
-        Value::Null => vec![0],
-        Value::Bool(b) => vec![if *b {1u8} else {0u8}],
+        Value::Bool(b) => Some(vec![if *b {1u8} else {0u8}]),
         Value::Number(n) => {
             if n.is_i64() {
                 // Store as bigendian
-                n.as_i64().unwrap().to_be_bytes().to_vec()
+                Some(n.as_i64().unwrap().to_be_bytes().to_vec())
             } else if n.is_f64() {
                 // Mask negative values so these will sort correctly.
                 let bits = n.as_f64().unwrap().to_bits();
-                (if (bits & 0x80000000_00000000) != 0 {
+                Some((if (bits & 0x80000000_00000000) != 0 {
                     // Negative, flip all bigs
                     bits ^ 0xffffffff_ffffffff
                 } else {
                     // Positive, flip sign bit
                     bits ^ 0x80000000_00000000
-                }).to_be_bytes().to_vec()
+                }).to_be_bytes().to_vec())
             } else {
-                vec![0]
+                Some(vec![0])
             }
         },
-        Value::String(s) => s.to_string().as_bytes().to_vec(),
-        Value::Array(_) => vec![0u8], // These are not indexable
-        Value::Object(_) => vec![0u8],
+        Value::String(s) => Some(s.to_string().as_bytes().to_vec()),
+        _ => None
     }
 }
 
@@ -82,10 +80,11 @@ impl Collection {
 
         // Update indices
         for index in &self.indices {
-            let result = lookup_field(&index.field, document);
-            if result.is_ok() {
+            if let Some(encoded) = lookup_field(&index.field, document)
+                .ok()
+                .and_then(|val| encode_key(&val)) {
                 btree_insert(index.btree_root,
-                    &encode_key(&result.unwrap()),
+                    &encoded,
                     &docid.to_le_bytes(),
                     page_cache,
                     page_allocator);
@@ -283,19 +282,19 @@ mod tests {
 
         let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
         let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(9).expect("Number::from_i128 failed"))));
+        assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(9).expect("Number::from_i128 failed"))).unwrap());
         assert_eq!(u64::from_le_bytes(val1.try_into().unwrap()), docid2.0);
 
         let Some((key2, val2)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key2, encode_key(&Value::Number(Number::from_i128(27).expect("Number::from_i128 failed"))));
+        assert_eq!(key2, encode_key(&Value::Number(Number::from_i128(27).expect("Number::from_i128 failed"))).unwrap());
         assert_eq!(u64::from_le_bytes(val2.try_into().unwrap()), docid4.0);
 
         let Some((key3, val3)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key3, encode_key(&Value::Number(Number::from_i128(32).expect("Number::from_i128 failed"))));
+        assert_eq!(key3, encode_key(&Value::Number(Number::from_i128(32).expect("Number::from_i128 failed"))).unwrap());
         assert_eq!(u64::from_le_bytes(val3.try_into().unwrap()), docid3.0);
 
         let Some((key4, val4)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key4, encode_key(&Value::Number(Number::from_i128(113).expect("Number::from_i128 failed"))));
+        assert_eq!(key4, encode_key(&Value::Number(Number::from_i128(113).expect("Number::from_i128 failed"))).unwrap());
         assert_eq!(u64::from_le_bytes(val4.try_into().unwrap()), docid1.0);
 
         assert_eq!(iter.next(), None);
@@ -316,7 +315,41 @@ mod tests {
 
         let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
         let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).expect("Number::from_i128 failed"))));
+        assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).expect("Number::from_i128 failed"))).unwrap());
+        assert_eq!(u64::from_le_bytes(val1.try_into().unwrap()), docid1.0);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_index_array_key() {
+        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        collection.create_index(&FieldPath::new("age"), &mut page_cache, &mut allocator);
+
+        let doc1 = serde_json::from_str(r#"{"name": "James Smith", "age": 39}"#).unwrap();
+        let docid1 = collection.insert_document(&doc1, &mut page_cache, &mut allocator);
+        let doc2 = serde_json::from_str(r#"{"name": {"foo": 1}}"#).unwrap();
+        collection.insert_document(&doc2, &mut page_cache, &mut allocator);
+
+        let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
+        let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).expect("Number::from_i128 failed"))).unwrap());
+        assert_eq!(u64::from_le_bytes(val1.try_into().unwrap()), docid1.0);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_index_object_key() {
+        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        collection.create_index(&FieldPath::new("age"), &mut page_cache, &mut allocator);
+
+        let doc1 = serde_json::from_str(r#"{"name": "James Smith", "age": 39}"#).unwrap();
+        let docid1 = collection.insert_document(&doc1, &mut page_cache, &mut allocator);
+        let doc2 = serde_json::from_str(r#"{"name": [1,2,3]}"#).unwrap();
+        collection.insert_document(&doc2, &mut page_cache, &mut allocator);
+
+        let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
+        let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).expect("Number::from_i128 failed"))).unwrap());
         assert_eq!(u64::from_le_bytes(val1.try_into().unwrap()), docid1.0);
         assert_eq!(iter.next(), None);
     }
