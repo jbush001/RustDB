@@ -162,16 +162,16 @@ impl Journal {
 struct PageCacheInner {
     page_map: HashMap<FilePageId, CachePageId>,
     pages: Vec<CachedPage>,
-    lru: IndexLru,
+    lru: IndexQueue,
+    dirty_page_list: IndexQueue,
     persistent_store: Rc<RefCell<dyn PersistentStore>>,
     transaction_active: bool,
-    dirty_page_list: Vec<CachePageId>,
     journal: Journal
 }
 
 impl PageCacheInner {
     fn new(size: usize, persistent_store: Rc<RefCell<dyn PersistentStore>>) -> Self {
-        let mut lru = IndexLru::new(size);
+        let mut lru = IndexQueue::new(size);
         for i in 0..size {
             lru.push_head(i);
         }
@@ -182,7 +182,7 @@ impl PageCacheInner {
             lru,
             persistent_store,
             transaction_active: false,
-            dirty_page_list: Vec::new(),
+            dirty_page_list: IndexQueue::new(size),
             journal: Journal {}
         }
     }
@@ -196,10 +196,14 @@ impl PageCacheInner {
                 // This page is already cached, return it.
                 let cpid = *cpid;
                 let cp = &mut self.pages[cpid.0];
-                if cp.ref_count == 0 && !cp.dirty {
-                    // Remove from the LRU while the page is locked (it can't be
-                    // evicted).
-                    self.lru.remove(cpid.0);
+                if cp.ref_count == 0 {
+                    // We maintain an invariant that pages are never in one of the
+                    // lists unless they have a ref count of zero.
+                    if cp.dirty {
+                        self.dirty_page_list.remove(cpid.0);
+                    } else {
+                        self.lru.remove(cpid.0);
+                    }
                 }
 
                 cp.ref_count += 1;
@@ -240,12 +244,7 @@ impl PageCacheInner {
         assert!(!cp.dirty || self.transaction_active);
         cp.ref_count -= 1;
         if cp.dirty {
-            // XXX hack. If the same page is relocked, ensure it gets added only
-            // once to the dirty page list. It would be more efficient to handle
-            // handle this with a clean invariant.
-            if !self.dirty_page_list.contains(&cpid) {
-                self.dirty_page_list.push(cpid);
-            }
+            self.dirty_page_list.push_head(cpid.0);
         } else if self.pages[cpid.0].ref_count == 0 {
             // Put back in LRU
             self.lru.push_head(cpid.0);
@@ -263,8 +262,8 @@ impl PageCacheInner {
         let mut store = self.persistent_store.borrow_mut();
 
         // Write to journal
-        for cpid in &self.dirty_page_list {
-            let cached_page = &mut self.pages[cpid.0];
+        for index in &self.dirty_page_list {
+            let cached_page = &mut self.pages[index];
             assert!(cached_page.ref_count == 0);
             self.journal.log_page_write(cached_page.file_page.unwrap(), &cached_page.data[..]);
 
@@ -275,15 +274,14 @@ impl PageCacheInner {
         store.sync();
 
         // Write to backing store.
-        for cpid in &self.dirty_page_list {
-            let cached_page = &mut self.pages[cpid.0];
+        for index in &self.dirty_page_list {
+            let cached_page = &mut self.pages[index];
             let file_offset = cached_page.file_page.unwrap().0 * PAGE_SIZE as u64;
-            store.write(file_offset, &*self.pages[cpid.0].data);
-            self.pages[cpid.0].dirty = false;
-            self.lru.push_head(cpid.0);
+            store.write(file_offset, &*self.pages[index].data);
+            self.pages[index].dirty = false;
+            self.lru.push_head(index);
         }
 
-        self.dirty_page_list.clear();
         self.transaction_active = false;
 
         store.sync();
