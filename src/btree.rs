@@ -526,22 +526,23 @@ mod tests {
     }
 
     #[test]
-    fn test_find() {
+    fn test_find_key() {
         let mut node: [u8; 4096] = [0; 4096];
         init_btree_node(&mut node);
 
-        append_entry(&mut node, "abacus".as_bytes(), "0".as_bytes());
-        append_entry(&mut node, "banana".as_bytes(), "0".as_bytes());
-        append_entry(&mut node, "beta".as_bytes(), "0".as_bytes());
-        append_entry(&mut node, "zebra".as_bytes(), "0".as_bytes());
+        append_entry(&mut node, "aaaa".as_bytes(), &[0u8]);
+        append_entry(&mut node, "bbbb".as_bytes(), &[0u8]);
+        append_entry(&mut node, "cccc".as_bytes(), &[0u8]);
+        append_entry(&mut node, "dddd".as_bytes(), &[0u8]);
         sanity_check_node(&node);
         assert_eq!(record_array::get_num_entries(&node), 4);
 
-        assert_eq!(find_key(&node, "aardvark".as_bytes()), 0); // Before first key
-        assert_eq!(find_key(&node, "banana".as_bytes()), 1); // equal to second key
-        assert_eq!(find_key(&node, "bananb".as_bytes()), 2); // slightly larger than second key
-        assert_eq!(find_key(&node, "betas".as_bytes()), 3); // longer than third key
-        assert_eq!(find_key(&node, "zzzzz".as_bytes()), 4); // higer than highest key
+        assert_eq!(find_key(&node, "aaa".as_bytes()), 0); // Search key is before first key
+        assert_eq!(find_key(&node, "aaaa".as_bytes()), 0); // Equal to first key
+        assert_eq!(find_key(&node, "aaab".as_bytes()), 1); // Between first and second key
+        assert_eq!(find_key(&node, "bbbb".as_bytes()), 1); // Equal to second key
+        assert_eq!(find_key(&node, "bbbc".as_bytes()), 2); // Between second and third key
+        assert_eq!(find_key(&node, "eeee".as_bytes()), 4); // Larger than largest key
     }
 
     #[test]
@@ -551,6 +552,25 @@ mod tests {
 
         assert_eq!(find_key(&node, "foo".as_bytes()), 0);
     }
+
+    #[test]
+    fn test_find_key_duplicate() {
+        let mut node: [u8; 4096] = [0; 4096];
+        init_btree_node(&mut node);
+
+        append_entry(&mut node, "aaaa".as_bytes(), &[0u8]);
+        append_entry(&mut node, "bbbb".as_bytes(), &[1u8]);
+        append_entry(&mut node, "bbbb".as_bytes(), &[2u8]);
+        append_entry(&mut node, "bbbb".as_bytes(), &[3u8]);
+        append_entry(&mut node, "bbbb".as_bytes(), &[4u8]);
+        append_entry(&mut node, "cccc".as_bytes(), &[5u8]);
+        append_entry(&mut node, "dddd".as_bytes(), &[6u8]);
+        sanity_check_node(&node);
+        assert_eq!(record_array::get_num_entries(&node), 7);
+
+        assert_eq!(find_key(&node, "bbbb".as_bytes()), 1);
+    }
+
 
     // Validates both record_array::get_free_space and get_entry_size return a coherent
     // value
@@ -868,6 +888,38 @@ mod tests {
         for _ in 0..5 {
             let (key, _) = cursor.next().expect("cursor didn't return value");
             assert_eq!(key, "apple".as_bytes());
+        }
+    }
+
+    #[test]
+    #[ignore = "currently failing"]
+    fn test_btree_many_same_key() {
+        let (page_cache, mut allocator, root_page) = populate_test_btree(0);
+        let insert_key = "aaaaaaa".as_bytes();
+        let num_entries = 1000;
+
+        {
+            let _transaction = page_cache.begin_transaction();
+            for i in 0..num_entries {
+                btree_insert(root_page, insert_key, &(i as u64).to_le_bytes(), &page_cache, &mut allocator);
+            }
+        }
+
+        print_btree(root_page, &page_cache);
+
+        let mut cursor = btree_find(root_page, insert_key, false, &page_cache);
+        for i in 0..num_entries {
+            println!("fetching {}", i);
+            let (key, value) = cursor.next().expect("cursor didn't return value");
+            assert_eq!(key, insert_key);
+            assert_eq!(value, &(i as u64).to_le_bytes());
+        }
+
+        let mut cursor = btree_find(root_page, insert_key, true, &page_cache);
+        for i in (0..num_entries).rev() {
+            let (key, value) = cursor.next().expect("cursor didn't return value");
+            assert_eq!(key, insert_key);
+            assert_eq!(value, &(i as u64).to_le_bytes());
         }
     }
 
