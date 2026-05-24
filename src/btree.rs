@@ -32,6 +32,8 @@ struct NodeHeader {
     left_child: u64,
 }
 
+const MAX_RECORD_SIZE: usize = (PAGE_SIZE - 32) / 4 - 16; // I added a little padding for safey
+
 // Each entry is:
 // key_length: u16
 // key: variable length
@@ -141,11 +143,24 @@ pub fn btree_find(root_node_fpid: FilePageId, key: &[u8], reverse: bool, page_ca
             }
         }
 
-        if index == 0 {
+        if key < get_entry_key(&page, 0) {
             let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
             current_node_fpid = FilePageId(header.left_child);
         } else {
-            current_node_fpid = FilePageId(u64::from_le_bytes(get_entry_value(&page, index - 1)
+            // The behavior of find_key is to return the
+            // first key greater or equal to the search key,
+            // but this routine wants the first one less than
+            // or equal. This code adapts this index to be as expected.
+            let next_index = if index == record_array::get_num_entries(&page) {
+                // This is greater than
+                index - 1
+            } else if key == get_entry_key(&page, index) {
+                index
+            } else {
+                index  - 1
+            };
+
+            current_node_fpid = FilePageId(u64::from_le_bytes(get_entry_value(&page, next_index)
                 .try_into().expect("value was not 8 bytes")));
         }
     }
@@ -159,6 +174,8 @@ pub fn btree_insert(root_node_fpid: FilePageId,
 {
     let mut current_node_fpid = root_node_fpid;
     let mut path: Vec<FilePageId> = Vec::new();
+
+    assert!(key.len() + value.len() < MAX_RECORD_SIZE);
 
     loop {
         path.push(current_node_fpid);
@@ -207,7 +224,7 @@ pub fn btree_insert(root_node_fpid: FilePageId,
             header2.prev_sib = new_page_fpid1.0;
 
             // Now do the actual insertion
-            if insert_key > split_key {
+            if insert_key >= split_key { // XXX bug should this be >=?
                 insert_entry(&mut new_page2, insert_key.as_slice(), insert_value.as_slice());
             } else {
                 insert_entry(&mut new_page1, insert_key.as_slice(), insert_value.as_slice());
@@ -297,9 +314,11 @@ fn print_btree(root_node_fpid: FilePageId, page_cache: &PageCache) {
     while !fifo.is_empty() {
         let next = fifo.remove(0);
         let page = page_cache.lock_page(next);
+        let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
+        println!("Node {} is_leaf {} left_child = {}", next.0, is_leaf(&page),
+            header.left_child);
         print_node(&page);
         if !is_leaf(&page) {
-            let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
             if header.left_child != INVALID_FPID.0 {
                 fifo.push(FilePageId(header.left_child));
             }
@@ -312,9 +331,15 @@ fn print_btree(root_node_fpid: FilePageId, page_cache: &PageCache) {
     }
 }
 
-fn to_hex(bytes: &[u8]) -> String {
+fn to_hex(bytes: &[u8], mut max_len: usize) -> String {
     let mut result: String = "".to_string();
     for x in bytes {
+        if max_len == 0 {
+            result += "...";
+            break;
+        }
+
+        max_len -= 1;
         result += format!("{:02x}", x).as_str();
     }
 
@@ -324,7 +349,7 @@ fn to_hex(bytes: &[u8]) -> String {
 fn print_node(node: &[u8]) {
     for i in 0..record_array::get_num_entries(node) {
         println!("{}. {} value {}", i,
-            to_hex(get_entry_key(node, i)), to_hex(get_entry_value(node, i)));
+            to_hex(get_entry_key(node, i), 16), to_hex(get_entry_value(node, i), 16));
     }
 }
 
@@ -426,8 +451,8 @@ fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
     let mut orig_index = 0;
     let mut bytes_copied = 0;
 
-    // Copy into out1
-    while bytes_copied < orig.len() / 2 {
+    // Copy into out1. Ensure we leave at least one entry to copy into out2.
+    while bytes_copied < orig.len() / 2 && orig_index < orig_entries - 1 {
         bytes_copied += append_entry(out1, get_entry_key(orig, orig_index),
             get_entry_value(orig, orig_index));
         orig_index += 1;
@@ -468,6 +493,9 @@ mod tests {
     use crate::page_cache::*;
     use crate::mocks::{MockPersistentStore};
     use crate::superblock::*;
+    use rand::rngs::{SmallRng};
+    use rand::{SeedableRng, RngExt};
+    use std::cmp::{Ord};
     use super::*;
 
     fn sanity_check_node(node: &[u8]) {
@@ -664,6 +692,28 @@ mod tests {
         }
     }
 
+    // This only has two entries. Ensure it doesn't put both entries in the
+    // first node, leaving none in the second (regression test).
+    #[test]
+    fn test_split_large_leaf() {
+        let mut node1: [u8; 4096] = [0; 4096];
+        let mut node2: [u8; 4096] = [0; 4096];
+        let mut node3: [u8; 4096] = [0; 4096];
+
+        init_btree_node(&mut node1);
+        set_u16(&mut node1, 0, FLAG_LEAF);
+        insert_entry(&mut node1, &[1u8; 2000], &[1u8, 8]);
+        insert_entry(&mut node1, &[2u8; 2000], &[2u8, 8]);
+
+        let separator_key = split_node(&node1, &mut node2, &mut node3);
+        assert_eq!(&separator_key, &[2u8; 2000]);
+
+        assert_eq!(record_array::get_num_entries(&node2), 1);
+        assert_eq!(record_array::get_num_entries(&node3), 1);
+        sanity_check_node(&node2);
+        sanity_check_node(&node3);
+    }
+
     #[test]
     fn test_leaf_flag() {
         let mut node: [u8; 4096] = [0; 4096];
@@ -674,11 +724,11 @@ mod tests {
     }
 
     fn prand_order(n: usize) -> Vec<usize> {
+        let seed = 0xc0fc47a65d406179;
+        let mut rng = SmallRng::seed_from_u64(seed);
         let mut result: Vec<usize> = (0..n).collect();
-        let mut seed: u32 = 12345;
         for i in (1..n).rev() {
-            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
-            let j = (seed & 0x7fffffff) as usize % n;
+            let j = rng.random_range(0..n);
             result.swap(i, j);
         }
 
@@ -689,7 +739,7 @@ mod tests {
         vec![index as u8; (index % 64) + 64]
     }
 
-    fn build_btree(num_entries: usize) -> (PageCache, PageAllocator, FilePageId) {
+    fn create_test_btree() -> (PageCache, PageAllocator, FilePageId) {
         let mock_io: Rc<RefCell<dyn PersistentStore>> =
             Rc::new(RefCell::new(MockPersistentStore::default()));
         let mut page_cache = PageCache::new(50, Rc::clone(&mock_io));
@@ -701,8 +751,14 @@ mod tests {
         }
 
         let mut allocator = PageAllocator::new(&mut page_cache);
-
         let root_page = btree_create(&page_cache, &mut allocator);
+
+        (page_cache, allocator, root_page)
+    }
+
+    fn populate_test_btree(num_entries: usize) -> (PageCache, PageAllocator, FilePageId) {
+        let (page_cache, mut allocator, root_page) = create_test_btree();
+        let _transaction = page_cache.begin_transaction();
         for i in prand_order(num_entries) {
             btree_insert(root_page, &gen_key_for_index(i), &(i as u64).to_le_bytes(),
                 &page_cache, &mut allocator);
@@ -714,7 +770,7 @@ mod tests {
     #[test]
     fn test_valid_btree_create() {
         const NUM_ENTRIES: usize = 127;
-        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+        let (page_cache, _alloc, root_page) = populate_test_btree(NUM_ENTRIES);
         let mut i = 0;
         for (key, val) in btree_iterate(root_page, false, &page_cache) {
             assert_eq!(key.as_slice(), gen_key_for_index(i));
@@ -727,7 +783,7 @@ mod tests {
     #[test]
     fn test_btree_backward_scan() {
         const NUM_ENTRIES: usize = 139;
-        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+        let (page_cache, _alloc, root_page) = populate_test_btree(NUM_ENTRIES);
 
         let mut cursor = btree_iterate(root_page, true, &page_cache);
         for i in (0..NUM_ENTRIES).rev() {
@@ -743,7 +799,7 @@ mod tests {
     #[test]
     fn test_btree_find() {
         const NUM_ENTRIES: usize = 149;
-        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+        let (page_cache, _alloc, root_page) = populate_test_btree(NUM_ENTRIES);
 
         const START_KEY_IDX: usize = 55;
         let mut cursor = btree_find(root_page, &gen_key_for_index(START_KEY_IDX), false, &page_cache);
@@ -759,7 +815,7 @@ mod tests {
     #[test]
     fn test_btree_find_begin() {
         const NUM_ENTRIES: usize = 151;
-        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+        let (page_cache, _alloc, root_page) = populate_test_btree(NUM_ENTRIES);
 
         let mut cursor = btree_find(root_page, &[0u8], false, &page_cache);
         let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
@@ -772,7 +828,7 @@ mod tests {
     #[test]
     fn test_btree_reverse_find_begin() {
         const NUM_ENTRIES: usize = 151;
-        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+        let (page_cache, _alloc, root_page) = populate_test_btree(NUM_ENTRIES);
 
         let mut cursor = btree_find(root_page, &[0u8], true, &page_cache);
         assert_eq!(cursor.next(), None);
@@ -782,7 +838,7 @@ mod tests {
     #[test]
     fn test_btree_find_past_end() {
         const NUM_ENTRIES: usize = 79;
-        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+        let (page_cache, _alloc, root_page) = populate_test_btree(NUM_ENTRIES);
 
         let mut cursor = btree_find(root_page, &[0xff; 255], false, &page_cache);
         assert_eq!(cursor.next(), None);
@@ -791,7 +847,7 @@ mod tests {
     // If we have duplicate keys, ensure that a cursor find will hit all of them.
     #[test]
     fn test_btree_find_duplicate_key() {
-        let (page_cache, mut allocator, root_page) = build_btree(0);
+        let (page_cache, mut allocator, root_page) = populate_test_btree(0);
 
         {
             let _transaction = page_cache.begin_transaction();
@@ -818,7 +874,7 @@ mod tests {
     #[test]
     fn test_btree_delete() {
         const NUM_ENTRIES: usize = 97;
-        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+        let (page_cache, _alloc, root_page) = populate_test_btree(NUM_ENTRIES);
 
         const INDEX_TO_DELETE: usize = 37;
         {
@@ -844,7 +900,7 @@ mod tests {
     #[test]
     fn test_btree_delete_not_present() {
         const NUM_ENTRIES: usize = 103;
-        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+        let (page_cache, _alloc, root_page) = populate_test_btree(NUM_ENTRIES);
 
         {
             let _transaction = page_cache.begin_transaction();
@@ -868,7 +924,7 @@ mod tests {
     #[test]
     fn test_btree_delete_no_value() {
         const NUM_ENTRIES: usize = 103;
-        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+        let (page_cache, _alloc, root_page) = populate_test_btree(NUM_ENTRIES);
         const INDEX_TO_DELETE: usize = 10;
 
         {
@@ -895,7 +951,7 @@ mod tests {
     #[ignore = "Needs to be fixed, see comments in btree_delete"]
     fn test_btree_delete_all() {
         const NUM_ENTRIES: usize = 67;
-        let (page_cache, _alloc, root_page) = build_btree(NUM_ENTRIES);
+        let (page_cache, _alloc, root_page) = populate_test_btree(NUM_ENTRIES);
         {
             let _transaction = page_cache.begin_transaction();
             for i in 0..NUM_ENTRIES {
@@ -907,10 +963,103 @@ mod tests {
         assert_eq!(cursor.next(), None);
     }
 
+    #[test]
+    #[ignore = "This is currently broken"]
+    fn iterate_empty() {
+        let (page_cache, mut _allocator, root_page) = create_test_btree();
+        let mut cursor = btree_iterate(root_page, false, &page_cache);
+        assert_eq!(cursor.next(), None);
+    }
+
     // Just ensures it doesn't crash...
     #[test]
     fn test_print_btree() {
-        let (page_cache, _alloc, root_page) = build_btree(50);
+        let (page_cache, _alloc, root_page) = populate_test_btree(50);
         print_btree(root_page, &page_cache);
+    }
+
+    #[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
+    struct KeyValue(Vec<u8>, Vec<u8>);
+
+    struct Oracle {
+        entries: Vec<KeyValue>
+    }
+
+    impl Oracle {
+        fn add(&mut self, key: &[u8], value: &[u8]) {
+            let kv = KeyValue(key.to_vec(), value.to_vec());
+            let pos = match self.entries.binary_search(&kv) {
+                Ok(pos) | Err(pos) => pos
+            };
+
+            self.entries.insert(pos, kv);
+        }
+
+        fn validate(&self, cursor: BTreeCursor) {
+            let mut db_entries: Vec<KeyValue> = cursor.map(|x | KeyValue(x.0, x.1)).collect();
+            db_entries.sort();
+            println!("db_entries {} self entries {}", db_entries.len(), self.entries.len());
+            for i in 0..std::cmp::min(db_entries.len(), self.entries.len()) {
+                if db_entries[i] != self.entries[i] {
+                    println!("mismatch at {} db_entry {:?} oracle {:?}", i, db_entries[i].0, self.entries[i].0);
+                    break;
+                }
+            }
+
+            assert_eq!(db_entries.len(), self.entries.len());
+            assert_eq!(db_entries, self.entries);
+            println!("tested okay");
+        }
+    }
+
+    fn random_value(rng: &mut impl RngExt) -> Vec<u8> {
+        let len = rng.random_range(0..256);
+        (1..len).map(|_| rng.random()).collect()
+    }
+
+    // This will fail if it completely removes all entries from a node,
+    // since reclaiming empty nodes is not implemented yet.
+    #[test]
+    #[ignore = "Still fails in some cases"]
+    fn test_btree_stress() {
+        let seed: u64 = 0x12345;
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut oracle = Oracle{ entries: Vec::new() };
+        let (page_cache, mut allocator, root_page) = create_test_btree();
+
+        for rep in 0..10000 {
+            println!("rep {}", rep);
+            match rng.random_range(0..2) {
+                0 => {
+                    let key = random_value(&mut rng);
+                    let value = random_value(&mut rng);
+                    println!("insert record");
+                    oracle.add(&key, &value);
+                    let _transaction = page_cache.begin_transaction();
+                    btree_insert(root_page, &key, &value, &page_cache, &mut allocator);
+                },
+                1 => {
+                    if !oracle.entries.is_empty() {
+                        let i = rng.random_range(0..oracle.entries.len());
+                        println!("delete record");
+                        let entry = &oracle.entries[i];
+                        let _transaction = page_cache.begin_transaction();
+                        btree_delete(root_page, &entry.0, Some(&entry.1), &page_cache);
+                        oracle.entries.remove(i);
+
+                        if rep == 117 {
+                            print_btree(root_page, &page_cache);
+                        }
+                    }
+                },
+                _ => unreachable!()
+            }
+
+            if oracle.entries.len() > 0 {
+                oracle.validate(btree_iterate(root_page, false, &page_cache));
+            }
+        }
+
+        oracle.validate(btree_iterate(root_page, false, &page_cache));
     }
 }
