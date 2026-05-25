@@ -120,8 +120,10 @@ pub fn get_record(page: &[u8], index: usize) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use more_asserts::{assert_le, assert_lt};
+    use rand::rngs::{SmallRng};
+    use rand::{SeedableRng, RngExt};
+    use super::*;
 
     fn sanity_check_record_array(page: &[u8]) {
         let mut sorted_rec_offs: Vec<usize> = Vec::new();
@@ -413,5 +415,45 @@ mod tests {
         init_array(&mut page);
         insert_record(&mut page, 0, "aardvark".as_bytes());
         get_record(&mut page, 1);
+    }
+
+    fn random_value(rng: &mut impl RngExt) -> Vec<u8> {
+        let len = rng.random_range(1..256);
+        (0..len).map(|_| rng.random()).collect()
+    }
+
+    #[test]
+    fn test_record_array_stress() {
+        let seed: u64 = 0x12345;
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut oracle: Vec<Vec<u8>> = Vec::new();
+        let mut page: [u8; 4096] = [0; 4096];
+        let mut space_available: usize = 4000; // Rounded down a bit
+
+        init_array(&mut page);
+        for rep in 0..2000 {
+            if rng.random::<f64>() > 0.5 || rep < 20 {
+                // Insert entry
+                let record = random_value(&mut rng);
+                let space_needed = record.len() + 4;
+                let slot = rng.random_range(0..oracle.len() + 1);
+                if space_needed <= space_available {
+                    insert_record(&mut page, slot, &record);
+                    oracle.insert(slot, record.clone());
+                    space_available -= space_needed;
+                }
+            } else if oracle.len() > 0 {
+                // Delete entry
+                let slot = rng.random_range(0..oracle.len());
+                delete_record(&mut page, slot);
+                space_available += oracle[slot].len() + 4;
+                oracle.remove(slot);
+            }
+
+            // Validate
+            for i in 0..oracle.len() {
+                assert_eq!(get_record(&page, i), &oracle[i]);
+            }
+        }
     }
 }
