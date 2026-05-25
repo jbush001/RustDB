@@ -1099,16 +1099,13 @@ mod tests {
         let mut oracle = Oracle{ entries: Vec::new() };
         let (page_cache, mut allocator, root_page) = create_test_btree();
 
-        // TODO tests still fail when this number gets larger
         let TOTAL_REPS = 2000;
         let MIN_PSUB: f64 = 0.3;
         for rep in 0..TOTAL_REPS {
             let p_add: f64 = MIN_PSUB + (1.0 - MIN_PSUB) * (1.0 - (rep as f64 / TOTAL_REPS as f64));
-            println!("rep {} entries {} p_add = {}", rep, oracle.entries.len(), p_add);
             if rng.random::<f64>() > p_add {
                 // Delete entry
                 if !oracle.entries.is_empty() {
-                    println!("delete record");
                     let i = rng.random_range(0..oracle.entries.len());
                     let entry = &oracle.entries[i];
                     let _transaction = page_cache.begin_transaction();
@@ -1119,7 +1116,6 @@ mod tests {
                 // Insert entry
                 let key = random_value(&mut rng);
                 let value = random_value(&mut rng);
-                println!("insert record");
                 oracle.add(&key, &value);
                 let _transaction = page_cache.begin_transaction();
                 btree_insert(root_page, &key, &value, &page_cache, &mut allocator);
