@@ -29,7 +29,7 @@ struct NodeHeader {
     _unused: [u8; 6],
     next_sib: u64,
     prev_sib: u64,
-    left_child: u64,
+    right_child: u64, // Node with keys larger than this one
 }
 
 const MAX_RECORD_SIZE: usize = (PAGE_SIZE - 32) / 4 - 16; // I added a little padding for safey
@@ -99,21 +99,20 @@ pub fn btree_iterate(root_node_fpid: FilePageId, reverse: bool, page_cache: &Pag
     let mut current_node_fpid = root_node_fpid;
     loop {
         let page = page_cache.lock_page(current_node_fpid);
-        let current_index = if reverse { record_array::get_num_entries(&page) - 1 } else { 0 };
         if is_leaf(&page) {
             return BTreeCursor {
                 current_node_fpid,
-                current_index,
+                current_index: if reverse { record_array::get_num_entries(&page) - 1 } else { 0 },
                 reverse,
                 page_cache: page_cache.clone()
             }
         }
 
-        if current_index == 0 {
+        if reverse {
             let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
-            current_node_fpid = FilePageId(header.left_child);
+            current_node_fpid = FilePageId(header.right_child);
         } else {
-            current_node_fpid = FilePageId(u64::from_le_bytes(get_entry_value(&page, current_index)
+            current_node_fpid = FilePageId(u64::from_le_bytes(get_entry_value(&page, 0)
                 .try_into().expect("value was not 8 bytes")));
         }
     }
@@ -143,24 +142,11 @@ pub fn btree_find(root_node_fpid: FilePageId, key: &[u8], reverse: bool, page_ca
             }
         }
 
-        if key < get_entry_key(&page, 0) {
+        if index == record_array::get_num_entries(&page) {
             let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
-            current_node_fpid = FilePageId(header.left_child);
+            current_node_fpid = FilePageId(header.right_child);
         } else {
-            // The behavior of find_key is to return the
-            // first key greater or equal to the search key,
-            // but this routine wants the first one less than
-            // or equal. This code adapts this index to be as expected.
-            let next_index = if index == record_array::get_num_entries(&page) {
-                // This is greater than
-                index - 1
-            } else if key == get_entry_key(&page, index) {
-                index
-            } else {
-                index  - 1
-            };
-
-            current_node_fpid = FilePageId(u64::from_le_bytes(get_entry_value(&page, next_index)
+            current_node_fpid = FilePageId(u64::from_le_bytes(get_entry_value(&page, index)
                 .try_into().expect("value was not 8 bytes")));
         }
     }
@@ -185,11 +171,11 @@ pub fn btree_insert(root_node_fpid: FilePageId,
         }
 
         let index = find_key(&page, key);
-        if index == 0 {
+        if index == record_array::get_num_entries(&page) {
             let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
-            current_node_fpid = FilePageId(header.left_child);
+            current_node_fpid = FilePageId(header.right_child);
         } else {
-            current_node_fpid = FilePageId(u64::from_le_bytes(get_entry_value(&page, index - 1).try_into()
+            current_node_fpid = FilePageId(u64::from_le_bytes(get_entry_value(&page, index).try_into()
                 .expect("value was not 8 bytes")));
         }
 
@@ -224,7 +210,7 @@ pub fn btree_insert(root_node_fpid: FilePageId,
             header2.prev_sib = new_page_fpid1.0;
 
             // Now do the actual insertion
-            if insert_key >= split_key { // XXX bug should this be >=?
+            if insert_key > split_key {
                 insert_entry(&mut new_page2, insert_key.as_slice(), insert_value.as_slice());
             } else {
                 insert_entry(&mut new_page1, insert_key.as_slice(), insert_value.as_slice());
@@ -233,38 +219,43 @@ pub fn btree_insert(root_node_fpid: FilePageId,
             // The root will have a single entry. It't no longer a leaf.
             init_btree_node(&mut page);
             set_not_leaf(&mut page);
-            append_entry(&mut page, &split_key, &new_page_fpid2.0.to_le_bytes());
+            append_entry(&mut page, &split_key, &new_page_fpid1.0.to_le_bytes());
             let page_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut page[0..record_array::HEADER_SIZE]);
-            page_header.left_child = new_page_fpid1.0;
+            page_header.right_child = new_page_fpid2.0;
             break;
         } else {
             // Split leaf or interior page.
             let new_page_fpid = page_allocator.alloc();
             let mut temp: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
             let mut new_page = page_cache.lock_page_mut(new_page_fpid);
-            let new_parent_key = split_node(&page, &mut temp, &mut new_page);
+            let new_parent_key = split_node(&page, &mut new_page, &mut temp);
+
+            // We will allocate a new page to be *before* this page. Temp is a holding
+            // area for what will be copied back to this page.
+
             if is_leaf(&page) {
                 let old_page_header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
-                let temp_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut temp[0..record_array::HEADER_SIZE]);
                 let new_page_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut new_page[0..record_array::HEADER_SIZE]);
-                temp_header.prev_sib = old_page_header.prev_sib;
-                temp_header.next_sib = new_page_fpid.0;
-                new_page_header.prev_sib = (*node_fpid).0;
-                new_page_header.next_sib = old_page_header.next_sib;
+                let temp_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut temp[0..record_array::HEADER_SIZE]);
 
-                // Need to fix back-link
-                let mut next_sib_page = page_cache.lock_page_mut(FilePageId(old_page_header.next_sib));
-                let next_sib_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut next_sib_page[0..record_array::HEADER_SIZE]);
-                next_sib_header.prev_sib = new_page_fpid.0;
+                temp_header.prev_sib = new_page_fpid.0;
+                temp_header.next_sib = old_page_header.next_sib;
+                new_page_header.prev_sib = old_page_header.prev_sib;
+                new_page_header.next_sib = (*node_fpid).0;
+
+                // Need to fix forward link
+                let mut prev_sib_page = page_cache.lock_page_mut(FilePageId(old_page_header.prev_sib));
+                let prev_sib_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut prev_sib_page[0..record_array::HEADER_SIZE]);
+                prev_sib_header.next_sib = new_page_fpid.0;
             }
 
             page.copy_from_slice(&temp);
 
             // Now do the actual insertion
             if insert_key > new_parent_key {
-                insert_entry(&mut new_page, insert_key.as_slice(), insert_value.as_slice());
-            } else {
                 insert_entry(&mut page, insert_key.as_slice(), insert_value.as_slice());
+            } else {
+                insert_entry(&mut new_page, insert_key.as_slice(), insert_value.as_slice());
             }
 
             insert_key = new_parent_key;
@@ -315,17 +306,17 @@ fn print_btree(root_node_fpid: FilePageId, page_cache: &PageCache) {
         let next = fifo.remove(0);
         let page = page_cache.lock_page(next);
         let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
-        println!("Node {} is_leaf {} left_child = {}", next.0, is_leaf(&page),
-            header.left_child);
+        println!("Node {} is_leaf {} right_child = {} prev_sib {} next_sib {}", next.0, is_leaf(&page),
+            header.right_child, header.prev_sib, header.next_sib);
         print_node(&page);
         if !is_leaf(&page) {
-            if header.left_child != INVALID_FPID.0 {
-                fifo.push(FilePageId(header.left_child));
-            }
-
             for i in 0..record_array::get_num_entries(&page) {
                 fifo.push(FilePageId(u64::from_le_bytes(get_entry_value(&page, i).try_into()
                 .expect("value was not 8 bytes"))));
+            }
+
+            if header.right_child != INVALID_FPID.0 {
+                fifo.push(FilePageId(header.right_child));
             }
         }
     }
@@ -389,12 +380,21 @@ fn get_entry_value(node: &[u8], rec_num: usize) -> &[u8] {
     &rec[2 + key_len..]
 }
 
-// A few ways to describe this:
-// - Returns the index the key should be inserted in to keep the array
-//   in order.
-// - Returns the lowest key that is greater than or equal to the search key.
-// If there are multiple copies of a key in the node, it will chose the lowest
-// indexed one (this is important when we have non-unique keys).
+//
+// Return an index into the array
+// How this behaves:
+// - If there is an exact match, return the index of the matching entry
+// - If there is not an exact match, return the index of the smallest
+//   key that is larger than the search key (i.e. where this would be
+//   inserted).
+// - If the search key is lower than the lowest key, return 0
+// - If it is higher than the highest key, return the number of entries
+//   in the table.
+// - If this matches aduplicate keys in the record, return the index of the
+//   lowest match.
+//
+// TODO: add a bias parameter that controls matching when there are duplicates.
+//
 fn find_key(node: &[u8], key: &[u8]) -> usize {
     let mut low = 0;
     let mut high = record_array::get_num_entries(node);
@@ -438,7 +438,7 @@ fn append_entry(node: &mut [u8], key: &[u8], value: &[u8]) -> usize {
 }
 
 // Returns the separator key.
-// NOTE: you must set the right_child in the returned out1 to the fpid of out2
+// NOTE: you must set the right_sibling in the returned out1 to the fpid of out2
 // (we don't know it here)
 fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
     init_btree_node(out1);
@@ -458,15 +458,21 @@ fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
         orig_index += 1;
     }
 
-    let separator = get_entry_key(orig, orig_index).to_vec();
+    let separator = if is_leaf(orig) {
+        // Remember the separator key, which is the highest key in the left node,
+        // but don't remove it.
+        get_entry_key(orig, orig_index - 1).to_vec()
+    } else {
+        // Remove the separator key, which will go into the parent. Save its
+        // node pointer into the right child of the left node.
+        let separator = get_entry_key(orig, orig_index).to_vec();
 
-    if !is_leaf(orig) {
-        // Remove the separator key, which will go into the parent. Save its value
-        // into the left child.
-        let header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut out2[0..record_array::HEADER_SIZE]);
-        header.left_child = u64::from_le_bytes(get_entry_value(orig, orig_index).try_into().expect("value was not 8 bytes"));
+        let header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut out1[0..record_array::HEADER_SIZE]);
+        header.right_child = u64::from_le_bytes(get_entry_value(orig, orig_index).try_into().expect("value was not 8 bytes"));
         orig_index += 1;
-    }
+
+        separator
+    };
 
     // Copy into out2
     while orig_index < orig_entries {
@@ -475,9 +481,9 @@ fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
         orig_index += 1;
     }
 
-    let out_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut out1[0..record_array::HEADER_SIZE]);
+    let out_header: &mut NodeHeader = bytemuck::from_bytes_mut(&mut out2[0..record_array::HEADER_SIZE]);
     let orig_header: &NodeHeader = bytemuck::from_bytes(&orig[0..record_array::HEADER_SIZE]);
-    out_header.left_child = orig_header.left_child;
+    out_header.right_child = orig_header.right_child;
 
     separator
 }
@@ -649,10 +655,10 @@ mod tests {
 
         let header1: &NodeHeader = bytemuck::from_bytes(&node1[0..record_array::HEADER_SIZE]);
         let header2: &NodeHeader = bytemuck::from_bytes(&node2[0..record_array::HEADER_SIZE]);
-        assert_eq!(header2.left_child, header1.left_child);
-        let header3: &NodeHeader = bytemuck::from_bytes(&node3[0..record_array::HEADER_SIZE]);
-        assert_eq!(header3.left_child, u64::from_le_bytes(get_entry_value(&node1, orig_sep_index)
+        assert_eq!(header2.right_child, u64::from_le_bytes(get_entry_value(&node1, orig_sep_index)
             .try_into().expect("value was not 8 bytes")));
+        let header3: &NodeHeader = bytemuck::from_bytes(&node3[0..record_array::HEADER_SIZE]);
+        assert_eq!(header3.right_child, header1.right_child);
 
         // Ensure all entries are present and in order
         let node2_recs = record_array::get_num_entries(&node2);
@@ -694,7 +700,7 @@ mod tests {
         sanity_check_node(&node2);
         sanity_check_node(&node3);
 
-        let orig_sep_index = record_array::get_num_entries(&node2);
+        let orig_sep_index = record_array::get_num_entries(&node2) - 1;
         assert_eq!(&separator_key, &get_entry_key(&node1, orig_sep_index));
 
         // Ensure all entries are present and in order
@@ -725,8 +731,7 @@ mod tests {
         insert_entry(&mut node1, &[1u8; 2000], &[1u8, 8]);
         insert_entry(&mut node1, &[2u8; 2000], &[2u8, 8]);
 
-        let separator_key = split_node(&node1, &mut node2, &mut node3);
-        assert_eq!(&separator_key, &[2u8; 2000]);
+        split_node(&node1, &mut node2, &mut node3);
 
         assert_eq!(record_array::get_num_entries(&node2), 1);
         assert_eq!(record_array::get_num_entries(&node3), 1);
