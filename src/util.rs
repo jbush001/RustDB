@@ -122,7 +122,7 @@ impl<'a> Iterator for IndexQueueIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let retval = self.index;
-        if self.index != None {
+        if self.index.is_some() {
             self.index = self.queue.next[self.index.unwrap()];
         }
 

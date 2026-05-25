@@ -14,7 +14,7 @@
 //   limitations under the License.
 //
 
-use serde_json::{Value, Number};
+use serde_json::Value;
 use crate::btree::*;
 use crate::page_cache::*;
 use crate::page_allocator::*;
@@ -211,7 +211,7 @@ mod tests {
     use std::cell::RefCell;
     use crate::page_cache::*;
     use crate::mocks::{MockPersistentStore};
-    use serde_json::{Value, json};
+    use serde_json::{Value, json, Number};
     use crate::btree::*;
     use crate::superblock::*;
     use super::*;

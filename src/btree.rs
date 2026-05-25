@@ -241,7 +241,7 @@ pub fn btree_insert(root_node_fpid: FilePageId,
                 temp_header.prev_sib = new_page_fpid.0;
                 temp_header.next_sib = old_page_header.next_sib;
                 new_page_header.prev_sib = old_page_header.prev_sib;
-                new_page_header.next_sib = (*node_fpid).0;
+                new_page_header.next_sib = node_fpid.0;
 
                 // Need to fix forward link
                 let mut prev_sib_page = page_cache.lock_page_mut(FilePageId(old_page_header.prev_sib));
@@ -384,19 +384,18 @@ enum Bias {
 }
 
 //
-// Return an index into the array
-// How this behaves:
-// - If there is an exact match, return the index of the matching entry
+// Return an index into the array:
+// - If there is a single exact match, return the index of the matching entry.
+// - If this matches multiple entries, the behavior is determined by the bias
+//   parameter
+//   * First: returns the lowest index match
+//   * Last: returns the next index after the highest match
 // - If there is not an exact match, return the index of the smallest
 //   key that is larger than the search key (i.e. where this would be
 //   inserted).
 // - If the search key is lower than the lowest key, return 0
 // - If it is higher than the highest key, return the number of entries
 //   in the table.
-// - If this matches duplicate keys in the record, the behavior is
-//   determined by the bias parameter
-//   * First: returns the lowest index match
-//   * Last: returns the next index after the highest match
 //
 fn find_key(node: &[u8], key: &[u8], bias: Bias) -> usize {
     let mut low = 0;
@@ -429,7 +428,7 @@ fn insert_entry(node: &mut [u8], key: &[u8], value: &[u8]) {
 }
 
 // Helper function to add entry to next available slot. This assumes the entry is
-// added in order. It assumes there is adequate space in the node.
+// added in order. It also assumes there is adequate space in the node.
 // Returns entry size
 fn append_entry(node: &mut [u8], key: &[u8], value: &[u8]) -> usize {
     let mut entry: Vec<u8> = Vec::with_capacity(key.len() + value.len() + 2);
@@ -443,8 +442,9 @@ fn append_entry(node: &mut [u8], key: &[u8], value: &[u8]) -> usize {
     get_entry_size(key, value)
 }
 
+// Split a single node into two new ones.
 // Returns the separator key.
-// NOTE: you must set the right_sibling in the returned out1 to the fpid of out2
+// NOTE: you must set the right_sibling in the returned out2 to the fpid of out1
 // (we don't know it here)
 fn split_node(orig: &[u8], out1: &mut [u8], out2: &mut [u8]) -> Vec<u8> {
     init_btree_node(out1);
@@ -585,8 +585,8 @@ mod tests {
     }
 
 
-    // Validates both record_array::get_free_space and get_entry_size return a coherent
-    // value
+    // Validates record_array::get_free_space and get_entry_size return
+    // consistent values.
     #[test]
     fn test_entry_size() {
         let mut node: [u8; 4096] = [0; 4096];
@@ -755,6 +755,8 @@ mod tests {
         assert!(!is_leaf(&node));
     }
 
+    // Helper function to create a shuffled list of indices. Each index
+    // is only present once.
     fn prand_order(n: usize) -> Vec<usize> {
         let seed = 0xc0fc47a65d406179;
         let mut rng = SmallRng::seed_from_u64(seed);
@@ -1041,6 +1043,8 @@ mod tests {
     #[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
     struct KeyValue(Vec<u8>, Vec<u8>);
 
+    // The Oracle is a parallel data structure that tracks the expected
+    // btree state based on random operations below.
     struct Oracle {
         entries: Vec<KeyValue>
     }
