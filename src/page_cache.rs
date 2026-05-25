@@ -203,6 +203,7 @@ impl PageCacheInner {
                         self.dirty_page_list.remove(cpid.0);
                     } else {
                         self.lru.remove(cpid.0);
+                        cp.dirty = writable;
                     }
                 }
 
@@ -274,7 +275,8 @@ impl PageCacheInner {
         store.sync();
 
         // Write to backing store.
-        for index in &self.dirty_page_list {
+        while !self.dirty_page_list.empty() {
+            let index = self.dirty_page_list.pop_tail().unwrap();
             let cached_page = &mut self.pages[index];
             let file_offset = cached_page.file_page.unwrap().0 * PAGE_SIZE as u64;
             store.write(file_offset, &*self.pages[index].data);
@@ -295,6 +297,11 @@ mod tests {
     use std::rc::Rc;
     use std::cell::RefCell;
     use std::any::Any;
+    use rand::rngs::{SmallRng};
+    use rand::{SeedableRng, RngExt, Rng};
+    use rand::seq::SliceRandom;
+    use rand::prelude::IndexedRandom;
+    use crate::mocks::*;
     use super::*;
 
     #[derive(Default)]
@@ -440,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pc_lock_write_dirty() {
+    fn test_pc_lock_write_dirty_cache_miss() {
         let (mock_io, page_cache) = setup_cache(5);
 
         const WRITE_VAL: u8 = 0x55;
@@ -462,6 +469,41 @@ mod tests {
             assert_eq!(m.write_data, WRITE_VAL);
         });
     }
+
+    // Cache hit is a different code path. This is a regression test.
+    #[test]
+    fn test_pc_lock_write_dirty_cache_hit() {
+        let (mock_io, page_cache) = setup_cache(5);
+
+        const WRITE_VAL: u8 = 0x55;
+
+        {
+            let _transaction = page_cache.begin_transaction();
+
+            // Read a page, set the wriable bit
+            let mut guard = page_cache.lock_page_mut(FilePageId(3));
+        }
+
+        // Now lock the page again.
+        {
+            let _transaction = page_cache.begin_transaction();
+
+            // Read a page, set the wriable bit
+            let mut guard = page_cache.lock_page_mut(FilePageId(3));
+            (*guard)[0] = WRITE_VAL;
+        }
+
+
+        // Unlocking will cause a writeback.
+        with_mock(&mock_io, |m| {
+            assert!(m.write_called);
+            assert_eq!(m.write_address, 0x3000);
+
+            // We only check the first byte, but ensure it is updated correctly.
+            assert_eq!(m.write_data, WRITE_VAL);
+        });
+    }
+
 
     // it's possible within a transaction we will lock the same page twice for
     // modification. Ensure this doesn't assert.
@@ -498,5 +540,68 @@ mod tests {
         let _guard4 = page_cache.lock_page_mut(FilePageId(3));
         let _guard5 = page_cache.lock_page_mut(FilePageId(4));
         let _guard6 = page_cache.lock_page_mut(FilePageId(5));
+    }
+
+    #[test]
+    fn test_empty_transaction() {
+        let (mock_io, page_cache) = setup_cache(5);
+        {
+            let _transaction = page_cache.begin_transaction();
+        }
+
+        with_mock(&mock_io, |m| {
+            assert!(!m.write_called);
+        });
+
+        // Now ensure we can do another write transaction with no issues.
+        const WRITE_VAL: u8 = 0xcc;
+        {
+            let transaction = page_cache.begin_transaction();
+            let mut guard = page_cache.lock_page_mut(FilePageId(3));
+            (*guard)[0] = WRITE_VAL;
+        }
+
+        with_mock(&mock_io, |m| {
+            assert!(m.write_called);
+            assert_eq!(m.write_address, 0x3000);
+            assert_eq!(m.write_data, WRITE_VAL);
+        });
+    }
+
+    #[test]
+    fn test_page_cache_stress() {
+        const TOTAL_PAGES: usize = 30;
+        const CACHE_PAGES: usize = 10;
+
+        let seed: u64 = 0x12345;
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mock_io: Rc<RefCell<dyn PersistentStore>> =
+            Rc::new(RefCell::new(MockPersistentStore::default()));
+        let page_cache = PageCache::new(CACHE_PAGES, Rc::clone(&mock_io));
+        let page_indices: Vec<usize> = (0..TOTAL_PAGES).collect();
+        let mut oracle: Vec<[u8; PAGE_SIZE]> = vec![[0u8; PAGE_SIZE]; TOTAL_PAGES];
+
+        for rep in 0..10000 {
+            let _transaction = page_cache.begin_transaction();
+            let num_pages = rng.random_range(1..5);
+            let mut to_update: Vec<usize> = page_indices.sample(&mut rng, num_pages).copied().collect();
+            to_update.shuffle(&mut rng);
+            let mut guards: Vec<PageGuardMut> = Vec::new();
+            for fpid in &to_update {
+                let mut guard = page_cache.lock_page_mut(FilePageId(*fpid as u64));
+                assert_eq!(*guard, oracle[*fpid]);
+                rng.fill(&mut oracle[*fpid]);
+                guard.copy_from_slice(oracle[*fpid].as_slice());
+                guards.push(guard);
+            }
+
+            // Note: guard are dropped here, forcing writeback
+        }
+
+        // Check all pages
+        for fpid in page_indices {
+            let mut guard = page_cache.lock_page(FilePageId(fpid as u64));
+            assert_eq!(*guard, oracle[fpid]);
+        }
     }
 }

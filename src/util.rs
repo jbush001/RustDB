@@ -56,7 +56,7 @@ impl IndexQueue {
     }
 
     pub fn empty(&self) -> bool {
-        self.head.is_some()
+        !self.head.is_some()
     }
 
     pub fn remove(&mut self, index: usize) {
@@ -182,9 +182,11 @@ mod tests {
         // You can't have a valid head pointer with valid tail and vice versa
         assert_eq!(queue.head.is_some(), queue.tail.is_some(), "Head/tail out of sync");
         if queue.head.is_none() {
+            assert!(queue.empty());
             return;
         }
 
+        assert!(!queue.empty());
         assert_eq!(queue.next.len(), queue.prev.len(), "Array size mismatch");
 
         // Forward traversal

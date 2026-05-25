@@ -1100,7 +1100,7 @@ mod tests {
         let (page_cache, mut allocator, root_page) = create_test_btree();
 
         // TODO tests still fail when this number gets larger
-        let TOTAL_REPS = 1000;
+        let TOTAL_REPS = 2000;
         let MIN_PSUB: f64 = 0.3;
         for rep in 0..TOTAL_REPS {
             let p_add: f64 = MIN_PSUB + (1.0 - MIN_PSUB) * (1.0 - (rep as f64 / TOTAL_REPS as f64));
