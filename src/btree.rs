@@ -55,13 +55,16 @@ impl Iterator for BTreeCursor {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
+        println!("btree_cursor::next");
         if self.current_node_fpid == INVALID_FPID {
+            println!("current node is null");
             return None
         }
 
         let page = self.page_cache.lock_page(self.current_node_fpid);
         let entry = (get_entry_key(&page, self.current_index).to_vec(),
             get_entry_value(&page, self.current_index).to_vec());
+        println!("getting entry at {}", self.current_index);
         let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
         if self.reverse {
             if self.current_index == 0 {
@@ -122,9 +125,9 @@ pub fn btree_find(root_node_fpid: FilePageId, key: &[u8], reverse: bool, page_ca
     let mut current_node_fpid = root_node_fpid;
     loop {
         let page = page_cache.lock_page(current_node_fpid);
-        let index = find_key(&page, key);
+        let index = find_key(&page, key, if reverse { Bias::Last } else { Bias::First });
         if is_leaf(&page) {
-            if (reverse && index == 0) || (index == record_array::get_num_entries(&page)) {
+            if (reverse && index == 0) || (!reverse && index == record_array::get_num_entries(&page)) {
                 // Nothing to fetch, return dummy cursor
                 return BTreeCursor {
                     current_node_fpid: INVALID_FPID,
@@ -170,7 +173,7 @@ pub fn btree_insert(root_node_fpid: FilePageId,
             break;
         }
 
-        let index = find_key(&page, key);
+        let index = find_key(&page, key, Bias::Last);
         if index == record_array::get_num_entries(&page) {
             let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
             current_node_fpid = FilePageId(header.right_child);
@@ -210,7 +213,7 @@ pub fn btree_insert(root_node_fpid: FilePageId,
             header2.prev_sib = new_page_fpid1.0;
 
             // Now do the actual insertion
-            if insert_key > split_key {
+            if insert_key >= split_key {
                 insert_entry(&mut new_page2, insert_key.as_slice(), insert_value.as_slice());
             } else {
                 insert_entry(&mut new_page1, insert_key.as_slice(), insert_value.as_slice());
@@ -252,7 +255,7 @@ pub fn btree_insert(root_node_fpid: FilePageId,
             page.copy_from_slice(&temp);
 
             // Now do the actual insertion
-            if insert_key > new_parent_key {
+            if insert_key >= new_parent_key {
                 insert_entry(&mut page, insert_key.as_slice(), insert_value.as_slice());
             } else {
                 insert_entry(&mut new_page, insert_key.as_slice(), insert_value.as_slice());
@@ -380,6 +383,11 @@ fn get_entry_value(node: &[u8], rec_num: usize) -> &[u8] {
     &rec[2 + key_len..]
 }
 
+enum Bias {
+    First,
+    Last
+}
+
 //
 // Return an index into the array
 // How this behaves:
@@ -390,21 +398,24 @@ fn get_entry_value(node: &[u8], rec_num: usize) -> &[u8] {
 // - If the search key is lower than the lowest key, return 0
 // - If it is higher than the highest key, return the number of entries
 //   in the table.
-// - If this matches aduplicate keys in the record, return the index of the
-//   lowest match.
+// - If this matches duplicate keys in the record, the behavior is
+//   determined by the bias parameter
+//   * First: returns the lowest index match
+//   * Last: returns the next index after the highest match
 //
-// TODO: add a bias parameter that controls matching when there are duplicates.
-//
-fn find_key(node: &[u8], key: &[u8]) -> usize {
+fn find_key(node: &[u8], key: &[u8], bias: Bias) -> usize {
     let mut low = 0;
     let mut high = record_array::get_num_entries(node);
     while low < high {
         let mid = (low + high) / 2;
         let mid_key = get_entry_key(node, mid);
-        if key <= mid_key {
-            high = mid
-        } else {
-            low = mid + 1
+        match bias {
+            Bias::First => {
+                if key <= mid_key { high = mid } else { low = mid + 1 };
+            }
+            Bias::Last => {
+                if key < mid_key { high = mid } else { low = mid + 1 };
+            }
         }
     }
 
@@ -413,7 +424,7 @@ fn find_key(node: &[u8], key: &[u8]) -> usize {
 
 // Insert a entry into a single node.
 fn insert_entry(node: &mut [u8], key: &[u8], value: &[u8]) {
-    let index = find_key(node, key);
+    let index = find_key(node, key, Bias::Last);
     let mut entry = Vec::with_capacity(key.len() + value.len() + 2);
     entry.push((key.len() & 0xff) as u8);
     entry.push((key.len() >> 8) as u8);
@@ -543,12 +554,12 @@ mod tests {
         sanity_check_node(&node);
         assert_eq!(record_array::get_num_entries(&node), 4);
 
-        assert_eq!(find_key(&node, "aaa".as_bytes()), 0); // Search key is before first key
-        assert_eq!(find_key(&node, "aaaa".as_bytes()), 0); // Equal to first key
-        assert_eq!(find_key(&node, "aaab".as_bytes()), 1); // Between first and second key
-        assert_eq!(find_key(&node, "bbbb".as_bytes()), 1); // Equal to second key
-        assert_eq!(find_key(&node, "bbbc".as_bytes()), 2); // Between second and third key
-        assert_eq!(find_key(&node, "eeee".as_bytes()), 4); // Larger than largest key
+        assert_eq!(find_key(&node, "aaa".as_bytes(), Bias::First), 0); // Search key is before first key
+        assert_eq!(find_key(&node, "aaaa".as_bytes(), Bias::First), 0); // Equal to first key
+        assert_eq!(find_key(&node, "aaab".as_bytes(), Bias::First), 1); // Between first and second key
+        assert_eq!(find_key(&node, "bbbb".as_bytes(), Bias::First), 1); // Equal to second key
+        assert_eq!(find_key(&node, "bbbc".as_bytes(), Bias::First), 2); // Between second and third key
+        assert_eq!(find_key(&node, "eeee".as_bytes(), Bias::First), 4); // Larger than largest key
     }
 
     #[test]
@@ -556,7 +567,7 @@ mod tests {
         let mut node: [u8; 4096] = [0; 4096];
         init_btree_node(&mut node);
 
-        assert_eq!(find_key(&node, "foo".as_bytes()), 0);
+        assert_eq!(find_key(&node, "foo".as_bytes(), Bias::First), 0);
     }
 
     #[test]
@@ -574,7 +585,8 @@ mod tests {
         sanity_check_node(&node);
         assert_eq!(record_array::get_num_entries(&node), 7);
 
-        assert_eq!(find_key(&node, "bbbb".as_bytes()), 1);
+        assert_eq!(find_key(&node, "bbbb".as_bytes(), Bias::First), 1);
+        assert_eq!(find_key(&node, "bbbb".as_bytes(), Bias::Last), 5);
     }
 
 
@@ -614,10 +626,10 @@ mod tests {
         sanity_check_node(&node);
         assert_eq!(record_array::get_num_entries(&node), 4);
 
-        assert_eq!(find_key(&node, "aardvark".as_bytes()), 0);
-        assert_eq!(find_key(&node, "apple".as_bytes()), 1);
-        assert_eq!(find_key(&node, "banana".as_bytes()), 2);
-        assert_eq!(find_key(&node, "zebra".as_bytes()), 3);
+        assert_eq!(find_key(&node, "aardvark".as_bytes(), Bias::First), 0);
+        assert_eq!(find_key(&node, "apple".as_bytes(), Bias::First), 1);
+        assert_eq!(find_key(&node, "banana".as_bytes(), Bias::First), 2);
+        assert_eq!(find_key(&node, "zebra".as_bytes(), Bias::First), 3);
     }
 
     #[test]
@@ -897,7 +909,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "currently failing"]
     fn test_btree_many_same_key() {
         let (page_cache, mut allocator, root_page) = populate_test_btree(0);
         let insert_key = "aaaaaaa".as_bytes();
@@ -914,7 +925,6 @@ mod tests {
 
         let mut cursor = btree_find(root_page, insert_key, false, &page_cache);
         for i in 0..num_entries {
-            println!("fetching {}", i);
             let (key, value) = cursor.next().expect("cursor didn't return value");
             assert_eq!(key, insert_key);
             assert_eq!(value, &(i as u64).to_le_bytes());
@@ -922,6 +932,7 @@ mod tests {
 
         let mut cursor = btree_find(root_page, insert_key, true, &page_cache);
         for i in (0..num_entries).rev() {
+            println!("reverse fetching {}", i);
             let (key, value) = cursor.next().expect("cursor didn't return value");
             assert_eq!(key, insert_key);
             assert_eq!(value, &(i as u64).to_le_bytes());
@@ -1005,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Needs to be fixed, see comments in btree_delete"]
+    #[ignore = "Broken because we don't remove empty nodes, see btree_delete"]
     fn test_btree_delete_all() {
         const NUM_ENTRIES: usize = 67;
         let (page_cache, _alloc, root_page) = populate_test_btree(NUM_ENTRIES);
@@ -1021,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "This is currently broken"]
+    #[ignore = "Broken because the iterator can't deal with empty nodes"]
     fn iterate_empty() {
         let (page_cache, mut _allocator, root_page) = create_test_btree();
         let mut cursor = btree_iterate(root_page, false, &page_cache);
@@ -1077,7 +1088,7 @@ mod tests {
     // This will fail if it completely removes all entries from a node,
     // since reclaiming empty nodes is not implemented yet.
     #[test]
-    #[ignore = "Still fails in some cases"]
+    #[ignore = "Still fails in some cases is a node is empty"]
     fn test_btree_stress() {
         let seed: u64 = 0x12345;
         let mut rng = SmallRng::seed_from_u64(seed);
