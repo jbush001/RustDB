@@ -55,16 +55,13 @@ impl Iterator for BTreeCursor {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        println!("btree_cursor::next");
         if self.current_node_fpid == INVALID_FPID {
-            println!("current node is null");
             return None
         }
 
         let page = self.page_cache.lock_page(self.current_node_fpid);
         let entry = (get_entry_key(&page, self.current_index).to_vec(),
             get_entry_value(&page, self.current_index).to_vec());
-        println!("getting entry at {}", self.current_index);
         let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
         if self.reverse {
             if self.current_index == 0 {
@@ -309,8 +306,6 @@ fn print_btree(root_node_fpid: FilePageId, page_cache: &PageCache) {
         let next = fifo.remove(0);
         let page = page_cache.lock_page(next);
         let header: &NodeHeader = bytemuck::from_bytes(&page[0..record_array::HEADER_SIZE]);
-        println!("Node {} is_leaf {} right_child = {} prev_sib {} next_sib {}", next.0, is_leaf(&page),
-            header.right_child, header.prev_sib, header.next_sib);
         print_node(&page);
         if !is_leaf(&page) {
             for i in 0..record_array::get_num_entries(&page) {
@@ -921,8 +916,6 @@ mod tests {
             }
         }
 
-        print_btree(root_page, &page_cache);
-
         let mut cursor = btree_find(root_page, insert_key, false, &page_cache);
         for i in 0..num_entries {
             let (key, value) = cursor.next().expect("cursor didn't return value");
@@ -932,7 +925,6 @@ mod tests {
 
         let mut cursor = btree_find(root_page, insert_key, true, &page_cache);
         for i in (0..num_entries).rev() {
-            println!("reverse fetching {}", i);
             let (key, value) = cursor.next().expect("cursor didn't return value");
             assert_eq!(key, insert_key);
             assert_eq!(value, &(i as u64).to_le_bytes());
@@ -1066,17 +1058,9 @@ mod tests {
         fn validate(&self, cursor: BTreeCursor) {
             let mut db_entries: Vec<KeyValue> = cursor.map(|x | KeyValue(x.0, x.1)).collect();
             db_entries.sort();
-            println!("db_entries {} self entries {}", db_entries.len(), self.entries.len());
-            for i in 0..std::cmp::min(db_entries.len(), self.entries.len()) {
-                if db_entries[i] != self.entries[i] {
-                    println!("mismatch at {} db_entry {:?} oracle {:?}", i, db_entries[i].0, self.entries[i].0);
-                    break;
-                }
-            }
 
             assert_eq!(db_entries.len(), self.entries.len());
             assert_eq!(db_entries, self.entries);
-            println!("tested okay");
         }
     }
 
@@ -1114,10 +1098,6 @@ mod tests {
                         let _transaction = page_cache.begin_transaction();
                         btree_delete(root_page, &entry.0, Some(&entry.1), &page_cache);
                         oracle.entries.remove(i);
-
-                        if rep == 117 {
-                            print_btree(root_page, &page_cache);
-                        }
                     }
                 },
                 _ => unreachable!()
