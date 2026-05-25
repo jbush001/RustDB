@@ -154,9 +154,6 @@ impl Journal {
 
     fn committed(&self) {
     }
-
-    fn replay(&self) {
-    }
 }
 
 struct PageCacheInner {
@@ -298,7 +295,7 @@ mod tests {
     use std::cell::RefCell;
     use std::any::Any;
     use rand::rngs::{SmallRng};
-    use rand::{SeedableRng, RngExt, Rng};
+    use rand::{SeedableRng, RngExt};
     use rand::seq::SliceRandom;
     use rand::prelude::IndexedRandom;
     use crate::mocks::*;
@@ -481,7 +478,7 @@ mod tests {
             let _transaction = page_cache.begin_transaction();
 
             // Read a page, set the wriable bit
-            let mut guard = page_cache.lock_page_mut(FilePageId(3));
+            let _guard = page_cache.lock_page_mut(FilePageId(3));
         }
 
         // Now lock the page again.
@@ -556,7 +553,7 @@ mod tests {
         // Now ensure we can do another write transaction with no issues.
         const WRITE_VAL: u8 = 0xcc;
         {
-            let transaction = page_cache.begin_transaction();
+            let _transaction = page_cache.begin_transaction();
             let mut guard = page_cache.lock_page_mut(FilePageId(3));
             (*guard)[0] = WRITE_VAL;
         }
@@ -581,7 +578,7 @@ mod tests {
         let page_indices: Vec<usize> = (0..TOTAL_PAGES).collect();
         let mut oracle: Vec<[u8; PAGE_SIZE]> = vec![[0u8; PAGE_SIZE]; TOTAL_PAGES];
 
-        for rep in 0..10000 {
+        for _ in 0..10000 {
             let _transaction = page_cache.begin_transaction();
             let num_pages = rng.random_range(1..5);
             let mut to_update: Vec<usize> = page_indices.sample(&mut rng, num_pages).copied().collect();
@@ -600,7 +597,7 @@ mod tests {
 
         // Check all pages
         for fpid in page_indices {
-            let mut guard = page_cache.lock_page(FilePageId(fpid as u64));
+            let guard = page_cache.lock_page(FilePageId(fpid as u64));
             assert_eq!(*guard, oracle[fpid]);
         }
     }

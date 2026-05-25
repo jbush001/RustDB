@@ -791,7 +791,9 @@ mod tests {
     }
 
     fn gen_key_for_index(index: usize) -> Vec<u8> {
-        index.to_be_bytes().to_vec()
+        let mut key = index.to_be_bytes().to_vec();
+        key.extend_from_slice(&[0u8].repeat(10));
+        key
     }
 
     fn create_test_btree() -> (PageCache, PageAllocator, FilePageId) {
@@ -837,7 +839,7 @@ mod tests {
 
     #[test]
     fn test_btree_backward_scan() {
-        const NUM_ENTRIES: usize = 139;
+        const NUM_ENTRIES: usize = 227; // Large enough so we have some interior nodes
         let (page_cache, _alloc, root_page) = populate_test_btree(NUM_ENTRIES);
 
         let mut cursor = btree_iterate(root_page, true, &page_cache);
@@ -1055,7 +1057,7 @@ mod tests {
     // Just ensures it doesn't crash...
     #[test]
     fn test_print_btree() {
-        let (page_cache, _alloc, root_page) = populate_test_btree(50);
+        let (page_cache, _alloc, root_page) = populate_test_btree(200);
         print_btree(root_page, &page_cache);
     }
 
@@ -1099,10 +1101,10 @@ mod tests {
         let mut oracle = Oracle{ entries: Vec::new() };
         let (page_cache, mut allocator, root_page) = create_test_btree();
 
-        let TOTAL_REPS = 2000;
-        let MIN_PSUB: f64 = 0.3;
-        for rep in 0..TOTAL_REPS {
-            let p_add: f64 = MIN_PSUB + (1.0 - MIN_PSUB) * (1.0 - (rep as f64 / TOTAL_REPS as f64));
+        let total_reps = 2000;
+        let min_psub: f64 = 0.3;
+        for rep in 0..total_reps {
+            let p_add: f64 = min_psub + (1.0 - min_psub) * (1.0 - (rep as f64 / total_reps as f64));
             if rng.random::<f64>() > p_add {
                 // Delete entry
                 if !oracle.entries.is_empty() {
