@@ -35,32 +35,73 @@ struct Collection {
     indices: Vec<Index>
 }
 
-// Encode a key so it is lexographically sortable, since the btree
-// only deals with byte vectors
-fn encode_key(key: &Value) -> Option<Vec<u8>> {
-    match key {
-        Value::Bool(b) => Some(vec![if *b {1u8} else {0u8}]),
+//
+// Encode a database value and its associated 64-bit document ID into a single
+// unique byte array that preserves the natural sort order under raw byte
+// comparison.
+// The underlying B-Tree treats keys as opaque byte arrays, and requires them
+// to be unique. However, our indexed fields are often not unique. This
+// causes problems especially when deleting records. To resolve this, this
+// function appends the unique document ID to serve as a deterministic
+// tie-breaker, guaranteeing strict uniqueness without breaking the sort order
+// of the original data.
+// This format is write-only and is not intended to be decoded; its sole purpose
+// is to ensure deterministic B-Tree sorting and deletions.
+//
+
+fn encode_key(key: &Value, docid: DocID) -> Option<Vec<u8>> {
+    // Prepend a tag in the event key types are mixed in an index.
+    const TAG_BOOL: u8 = 1;
+    const TAG_INT: u8 = 2;
+    const TAG_FLOAT: u8 = 3;
+    const TAG_STRING: u8 = 4;
+
+    let mut encoded = match key {
+        Value::Bool(b) => {
+            vec![TAG_BOOL, if *b {1u8} else {0u8}]
+        },
         Value::Number(n) => {
-            if n.is_i64() {
+            if let Some(i) = n.as_i64() {
                 // Store as bigendian
-                Some(n.as_i64().unwrap().to_be_bytes().to_vec())
-            } else if n.is_f64() {
+                let mut bytes = i.to_be_bytes();
+                bytes[0] ^= 0x80; // Flip the sign to ensure negative values sort before positive
+                let mut v = vec![TAG_INT];
+                v.extend_from_slice(&bytes);
+                v
+            } else if let Some(f) = n.as_f64() {
                 // Mask negative values so these will sort correctly.
-                let bits = n.as_f64().unwrap().to_bits();
-                Some((if (bits & 0x80000000_00000000) != 0 {
-                    // Negative, flip all bigs
+                let bits = f.to_bits();
+                let masked = if (bits & 0x80000000_00000000) != 0 {
+                    // Negative, flip all bigt
                     bits ^ 0xffffffff_ffffffff
                 } else {
                     // Positive, flip sign bit
                     bits ^ 0x80000000_00000000
-                }).to_be_bytes().to_vec())
+                };
+
+                let mut v = vec![TAG_FLOAT];
+                v.extend_from_slice(&masked.to_be_bytes());
+                v
             } else {
-                Some(vec![0])
+                return None;
             }
         },
-        Value::String(s) => Some(s.to_string().as_bytes().to_vec()),
-        _ => None
-    }
+        Value::String(s) => {
+            let mut v = vec![TAG_STRING];
+            v.extend_from_slice(s.as_bytes());
+            v
+        }
+        _ => { return None; }
+    };
+
+    // The delimiter ensures sort order is preserved even for variable length
+    // keys.
+    encoded.push(0);
+
+    // Append document ID to serve as a tie breaker.
+    encoded.extend_from_slice(&docid.0.to_be_bytes());
+
+    Some(encoded)
 }
 
 impl Collection {
@@ -82,7 +123,7 @@ impl Collection {
         for index in &self.indices {
             if let Some(encoded) = lookup_field(&index.field, document)
                 .ok()
-                .and_then(|val| encode_key(&val)) {
+                .and_then(|val| encode_key(&val, DocID(docid))) {
                 btree_insert(index.btree_root,
                     &encoded,
                     &docid.to_le_bytes(),
@@ -107,7 +148,7 @@ impl Collection {
     fn iterate(&mut self, page_cache: &PageCache) -> impl Iterator<Item = (DocID, Value)> {
         let doc_cursor = btree_iterate(self.document_btree_root, false, page_cache);
         doc_cursor.map(|(key, value)| {
-            let docid = DocID(u64::from_be_bytes(key.try_into().expect("failed to convert docid")));
+            let docid = DocID(u64::from_be_bytes(key.try_into().unwrap()));
             let doc = serde_json::from_slice(&value).expect("Failed to parse JSON");
 
             (docid, doc)
@@ -285,19 +326,19 @@ mod tests {
 
         let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
         let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(9).expect("Number::from_i128 failed"))).unwrap());
+        assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(9).unwrap()), docid2).unwrap());
         assert_eq!(u64::from_le_bytes(val1.try_into().unwrap()), docid2.0);
 
         let Some((key2, val2)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key2, encode_key(&Value::Number(Number::from_i128(27).expect("Number::from_i128 failed"))).unwrap());
+        assert_eq!(key2, encode_key(&Value::Number(Number::from_i128(27).unwrap()), docid4).unwrap());
         assert_eq!(u64::from_le_bytes(val2.try_into().unwrap()), docid4.0);
 
         let Some((key3, val3)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key3, encode_key(&Value::Number(Number::from_i128(32).expect("Number::from_i128 failed"))).unwrap());
+        assert_eq!(key3, encode_key(&Value::Number(Number::from_i128(32).unwrap()), docid3).unwrap());
         assert_eq!(u64::from_le_bytes(val3.try_into().unwrap()), docid3.0);
 
         let Some((key4, val4)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key4, encode_key(&Value::Number(Number::from_i128(113).expect("Number::from_i128 failed"))).unwrap());
+        assert_eq!(key4, encode_key(&Value::Number(Number::from_i128(113).unwrap()), docid1).unwrap());
         assert_eq!(u64::from_le_bytes(val4.try_into().unwrap()), docid1.0);
 
         assert_eq!(iter.next(), None);
@@ -368,23 +409,26 @@ mod tests {
         collection.create_index(&FieldPath::new("instock"), &mut page_cache, &mut allocator);
 
         let doc1 = serde_json::from_str(r#"{"item": "Eggs", "instock": true}"#).unwrap();
-        collection.insert_document(&doc1, &mut page_cache, &mut allocator);
-        let doc2 = serde_json::from_str(r#"{"item": "Whole Wheat Bread", "instock":false}"#).unwrap();
-        collection.insert_document(&doc2, &mut page_cache, &mut allocator);
+        let docid1 = collection.insert_document(&doc1, &mut page_cache, &mut allocator);
+        let doc2 = serde_json::from_str(r#"{"item": "Whole Wheat Bread", "instock": false}"#).unwrap();
+        let docid2 = collection.insert_document(&doc2, &mut page_cache, &mut allocator);
         let doc3 = serde_json::from_str(r#"{"item": "Peanut Butter", "instock": true}"#).unwrap();
-        collection.insert_document(&doc3, &mut page_cache, &mut allocator);
+        let docid3 = collection.insert_document(&doc3, &mut page_cache, &mut allocator);
         let doc4 = serde_json::from_str(r#"{"item": "Dom Perignon", "instock": false}"#).unwrap();
-        collection.insert_document(&doc4, &mut page_cache, &mut allocator);
+        let docid4 = collection.insert_document(&doc4, &mut page_cache, &mut allocator);
 
         let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
-        let Some((key1, _val1)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key1[0], 0);
         let Some((key2, _val2)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key2[0], 0);
-        let Some((key3, _val3)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key3[0], 1);
+        assert_eq!(key2, encode_key(&Value::Bool(false), docid2).unwrap());
+
         let Some((key4, _val4)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key4[0], 1);
+        assert_eq!(key4, encode_key(&Value::Bool(false), docid4).unwrap());
+
+        let Some((key1, _val1)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(key1, encode_key(&Value::Bool(true), docid1).unwrap());
+
+        let Some((key3, _val3)) = iter.next() else { panic!("iterator did not return value") };
+        assert_eq!(key3, encode_key(&Value::Bool(true), docid3).unwrap());
 
         assert_eq!(iter.next(), None);
     }
@@ -405,7 +449,7 @@ mod tests {
 
         let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
         let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).expect("Number::from_i128 failed"))).unwrap());
+        assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).unwrap()), docid1).unwrap());
         assert_eq!(u64::from_le_bytes(val1.try_into().unwrap()), docid1.0);
         assert_eq!(iter.next(), None);
     }
@@ -423,7 +467,7 @@ mod tests {
 
         let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
         let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).expect("Number::from_i128 failed"))).unwrap());
+        assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).unwrap()), docid1).unwrap());
         assert_eq!(u64::from_le_bytes(val1.try_into().unwrap()), docid1.0);
         assert_eq!(iter.next(), None);
     }
@@ -442,7 +486,7 @@ mod tests {
 
         let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
         let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
-        assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).expect("Number::from_i128 failed"))).unwrap());
+        assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).unwrap()), docid1).unwrap());
         assert_eq!(u64::from_le_bytes(val1.try_into().unwrap()), docid1.0);
         assert_eq!(iter.next(), None);
     }
