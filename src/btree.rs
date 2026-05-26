@@ -165,16 +165,11 @@ pub fn btree_find(root_node_fpid: FilePageId, key: &[u8], reverse: bool, page_ca
     }
 }
 
-pub fn btree_insert(root_node_fpid: FilePageId,
+fn find_with_path(root_node_fpid: FilePageId,
     key: &[u8],
-    value: &[u8],
-    page_cache: &PageCache,
-    page_allocator: &mut PageAllocator)
-{
+    page_cache: &PageCache) -> Vec<FilePageId> {
     let mut current_node_fpid = root_node_fpid;
     let mut path: Vec<FilePageId> = Vec::new();
-
-    assert!(key.len() + value.len() < MAX_RECORD_SIZE);
 
     loop {
         path.push(current_node_fpid);
@@ -194,6 +189,20 @@ pub fn btree_insert(root_node_fpid: FilePageId,
 
         assert!(current_node_fpid != INVALID_FPID, "Interior node has non-leaf children");
     }
+
+    path
+}
+
+pub fn btree_insert(root_node_fpid: FilePageId,
+    key: &[u8],
+    value: &[u8],
+    page_cache: &PageCache,
+    page_allocator: &mut PageAllocator)
+{
+    assert!(key.len() + value.len() < MAX_RECORD_SIZE);
+
+    let path = find_with_path(root_node_fpid, key, page_cache);
+
 
     // We're now at a leaf. Insert and walk back up the tree splitting nodes
     // as needed.
@@ -284,38 +293,24 @@ pub fn btree_insert(root_node_fpid: FilePageId,
     }
 }
 
-// If there are not unique keys, value should be specified here. Otherwise this will
-// arbitrarily delete one entry. If there are unique keys, it is not required.
 fn btree_delete(root_node_fpid: FilePageId,
     key: &[u8],
     page_cache: &PageCache)
 {
-    // Since the btree doesn't enforce unique keys by default, we use a cursor
-    // to find the specific entry to delete (for our use cases, we know the
-    // key/value tuple will be unique, although btree code does not enforce
-    // that).
-    let mut cursor = btree_find(root_node_fpid, key, false, page_cache);
-
-    // Need to save these because cursor will post-update
-    let page_fpid = cursor.current_node_fpid;
-    let index = cursor.current_index;
-    let next = cursor.next();
-    if next.is_none() {
+    let path = find_with_path(root_node_fpid, key, page_cache);
+    let leaf_page = path.last().unwrap();
+    let mut page = page_cache.lock_page_mut(*leaf_page);
+    let index = find_key(&page, key);
+    if index == record_array::get_num_entries(&page)
+        || get_entry_key(&page, index) != key {
+        println!("btree_delete: warning, key not found");
         return;
     }
 
-    let (entry_key, _) = next.unwrap();
-    if key == entry_key {
-        let mut page = page_cache.lock_page_mut(page_fpid);
+    record_array::delete_record(&mut page, index);
 
-        // TODO: if the record array is now empty, we should delete it, and walk up
-        // the parent chain, potentially cascading the delete. Some other places
-        // in the code make assumptions there aren't empty nodes.
-        record_array::delete_record(&mut page, index);
-    } else {
-        // TODO: determine what to do here
-        println!("warning: btree_delete did not find a record");
-    }
+    // TODO: if the record array is now empty, we should delete it, and walk up
+    // the parent chain, potentially cascading the delete.
 }
 
 fn print_btree(root_node_fpid: FilePageId, page_cache: &PageCache) {
