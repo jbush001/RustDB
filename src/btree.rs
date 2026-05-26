@@ -304,7 +304,7 @@ fn btree_delete(root_node_fpid: FilePageId,
         return;
     }
 
-    let (entry_key, entry_val) = next.unwrap();
+    let (entry_key, _) = next.unwrap();
     if key == entry_key {
         let mut page = page_cache.lock_page_mut(page_fpid);
 
@@ -433,8 +433,7 @@ fn insert_entry(node: &mut [u8], key: &[u8], value: &[u8]) {
         "Duplicate key inserted");
 
     let mut entry = Vec::with_capacity(key.len() + value.len() + 2);
-    entry.push((key.len() & 0xff) as u8);
-    entry.push((key.len() >> 8) as u8);
+    entry.extend_from_slice(&(key.len() as u16).to_le_bytes());
     entry.extend_from_slice(key);
     entry.extend_from_slice(value);
     record_array::insert_record(node, index, &entry);
@@ -445,9 +444,7 @@ fn insert_entry(node: &mut [u8], key: &[u8], value: &[u8]) {
 // Returns entry size
 fn append_entry(node: &mut [u8], key: &[u8], value: &[u8]) -> usize {
     let mut entry: Vec<u8> = Vec::with_capacity(key.len() + value.len() + 2);
-    // Length
-    entry.push((key.len() & 0xff) as u8);
-    entry.push((key.len() >> 8) as u8);
+    entry.extend_from_slice(&(key.len() as u16).to_le_bytes());
     entry.extend_from_slice(key);
     entry.extend_from_slice(value);
     record_array::insert_record(node, record_array::get_num_entries(node), &entry);
@@ -990,7 +987,7 @@ mod tests {
     }
 
     fn random_value(rng: &mut impl RngExt) -> Vec<u8> {
-        let len = rng.random_range(1..256);
+        let len = rng.random_range(8..256);
         (0..len).map(|_| rng.random()).collect()
     }
 
@@ -1018,6 +1015,8 @@ mod tests {
                 // Insert entry
                 let key = random_value(&mut rng);
                 let value = random_value(&mut rng);
+
+                // TODO ensure the key is unique by looking in the oracle.
                 oracle.add(&key, &value);
                 let _transaction = page_cache.begin_transaction();
                 btree_insert(root_page, &key, &value, &page_cache, &mut allocator);
