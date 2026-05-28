@@ -33,7 +33,6 @@ use crate::util::*;
 // where each record starts with a 16-bit length, then the record contents.
 //
 
-pub const HEADER_SIZE: usize = 32;
 const ENTRY_START_FIELD_OFFS: usize = 32;
 const NUM_ENTRIES_FIELD_OFFS: usize = 34;
 const INDEX_OFFS: usize = 36;
@@ -451,6 +450,7 @@ mod tests {
             }
 
             // Validate
+            sanity_check_record_array(&page);
             for i in 0..oracle.len() {
                 assert_eq!(get_record(&page, i), &oracle[i]);
             }
