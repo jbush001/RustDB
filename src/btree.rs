@@ -428,7 +428,7 @@ fn find_key(node: &[u8], key: &[u8]) -> usize {
 // Insert a entry into a single node.
 fn insert_entry(node: &mut [u8], key: &[u8], value: &[u8]) {
     let index = find_key(node, key);
-    assert!(index == record_array::get_num_entries(&node) || get_entry_key(&node, index) != key,
+    assert!(index == record_array::get_num_entries(node) || get_entry_key(node, index) != key,
         "Duplicate key inserted");
 
     let mut entry = Vec::with_capacity(key.len() + value.len() + 2);

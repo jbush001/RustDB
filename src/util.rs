@@ -56,7 +56,7 @@ impl IndexQueue {
     }
 
     pub fn empty(&self) -> bool {
-        !self.head.is_some()
+        self.head.is_none()
     }
 
     pub fn remove(&mut self, index: usize) {
