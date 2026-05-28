@@ -275,7 +275,7 @@ pub fn btree_insert(root_node_fpid: FilePageId,
     }
 }
 
-fn btree_delete(root_node_fpid: FilePageId,
+pub fn btree_delete(root_node_fpid: FilePageId,
     key: &[u8],
     page_cache: &PageCache,
     _allocator: &mut PageAllocator)

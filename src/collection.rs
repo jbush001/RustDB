@@ -14,16 +14,18 @@
 //   limitations under the License.
 //
 
+// TODO: collection metadata is not persisted.
+
 use serde_json::Value;
 use crate::btree::*;
 use crate::page_cache::*;
 use crate::page_allocator::*;
 use regex::Regex;
 
+// Unique identifier (within a collection) for a specific document.
 #[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
 struct DocID(u64);
 
-// TODO: collection metadata is not persisted.
 struct Index {
     field: FieldPath,
     btree_root: FilePageId
@@ -36,19 +38,16 @@ struct Collection {
 }
 
 //
-// Encode a database value and its associated 64-bit document ID into a single
-// unique byte array that preserves the natural sort order under raw byte
-// comparison.
-// The underlying B-Tree treats keys as opaque byte arrays, and requires them
-// to be unique. However, our indexed fields are often not unique. This
-// causes problems especially when deleting records. To resolve this, this
-// function appends the unique document ID to serve as a deterministic
-// tie-breaker, guaranteeing strict uniqueness without breaking the sort order
-// of the original data.
-// This format is write-only and is not intended to be decoded; its sole purpose
-// is to ensure deterministic B-Tree sorting and deletions.
+// Encode a database value and its associated 64-bit document ID into a
+// byte array that preserves the natural sort order under raw byte
+// comparison and ensures keys in the BTree are unique.
 //
-
+// The underlying B-Tree treats keys as opaque byte arrays, and requires them
+// to be unique. However, our indexed fields are often not unique. To resolve
+// this, this function appends the document ID to serve as a deterministic
+// tie-breaker in a way that doesn't break the sort order of the original data.
+// This function is basically one-way and is not intended to be decoded.
+//
 fn encode_key(key: &Value, docid: DocID) -> Option<Vec<u8>> {
     // Prepend a tag in the event key types are mixed in an index.
     const TAG_BOOL: u8 = 1;
@@ -72,7 +71,7 @@ fn encode_key(key: &Value, docid: DocID) -> Option<Vec<u8>> {
                 // Mask negative values so these will sort correctly.
                 let bits = f.to_bits();
                 let masked = if (bits & 0x80000000_00000000) != 0 {
-                    // Negative, flip all bigt
+                    // Negative, flip all bits
                     bits ^ 0xffffffff_ffffffff
                 } else {
                     // Positive, flip sign bit
@@ -105,7 +104,7 @@ fn encode_key(key: &Value, docid: DocID) -> Option<Vec<u8>> {
 }
 
 impl Collection {
-    fn insert_document(&mut self,
+    pub fn insert_document(&mut self,
         document: &Value,
         page_cache: &PageCache,
         page_allocator: &mut PageAllocator) -> DocID {
@@ -135,7 +134,7 @@ impl Collection {
         DocID(docid)
     }
 
-    fn create_index(&mut self, path: &FieldPath, page_cache: &PageCache,
+    pub fn create_index(&mut self, path: &FieldPath, page_cache: &PageCache,
         page_allocator: &mut PageAllocator) {
         let index = Index {
             field: path.clone(),
@@ -155,8 +154,42 @@ impl Collection {
         })
     }
 
-    // TODO: need to delete from collection
+    // TODO decide how to handle missing document. Should it be an error, or is it
+    // fine to ignore it?
+    fn delete(&mut self, docid: DocID, page_cache: &PageCache, page_allocator: &mut PageAllocator) {
+        let docid_key = &docid.0.to_be_bytes();
+        let mut cursor = btree_find(self.document_btree_root, docid_key, false, page_cache);
+        let entry = cursor.next();
+        if entry.is_none() {
+            // Not present, case 1
+            return;
+        }
 
+        let (got_docid, document_bytes) = entry.unwrap();
+        if got_docid != docid_key {
+            // not present, case 2
+            return;
+        }
+
+        btree_delete(self.document_btree_root,
+            docid_key,
+            page_cache,
+            page_allocator);
+
+        let document = serde_json::from_slice(&document_bytes).expect("Failed to parse JSON");
+
+        // Remove from indices
+        for index in &self.indices {
+            if let Some(encoded) = lookup_field(&index.field, &document)
+                .ok()
+                .and_then(|val| encode_key(&val, docid)) {
+                btree_delete(index.btree_root,
+                    &encoded,
+                    page_cache,
+                    page_allocator);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -573,5 +606,76 @@ mod tests {
     #[ignore = "Need to implement checking"]
     fn field_path_invalid_index() {
         let _path = FieldPath::new("age[%%]");
+    }
+
+    #[test]
+    fn test_delete() {
+        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let _transaction = page_cache.begin_transaction();
+
+        collection.create_index(&FieldPath::new("foo"), &mut page_cache, &mut allocator);
+        collection.create_index(&FieldPath::new("bar"), &mut page_cache, &mut allocator);
+
+        let doc1 = serde_json::from_str(r#"{"foo": "AAA", "bar": 1.2, "baz": true}"#).unwrap();
+        let docid1 = collection.insert_document(&doc1, &mut page_cache, &mut allocator);
+        let doc2 = serde_json::from_str(r#"{"foo": "BBBB", "bar": 2.3, "baz": false}"#).unwrap();
+        let docid2 = collection.insert_document(&doc2, &mut page_cache, &mut allocator);
+        let doc3 = serde_json::from_str(r#"{"foo": "CCCCC", "bar": 3.4, "baz": true}"#).unwrap();
+        let docid3 = collection.insert_document(&doc3, &mut page_cache, &mut allocator);
+        let doc4 = serde_json::from_str(r#"{"foo": "DDDDDD", "bar": 4.5, "baz": false}"#).unwrap();
+        let docid4 = collection.insert_document(&doc4, &mut page_cache, &mut allocator);
+
+        collection.delete(docid2, &mut page_cache, &mut allocator);
+
+        // Ensure this is removed from all indices
+        {
+            let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache); // foo
+            let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
+            assert_eq!(key1, encode_key(&Value::String("AAA".to_string()), docid1).unwrap());
+            assert_eq!(u64::from_le_bytes(val1.try_into().unwrap()), docid1.0);
+
+            let Some((key3, val3)) = iter.next() else { panic!("iterator did not return value") };
+            assert_eq!(key3, encode_key(&Value::String("CCCCC".to_string()), docid3).unwrap());
+            assert_eq!(u64::from_le_bytes(val3.try_into().unwrap()), docid3.0);
+
+            let Some((key4, val4)) = iter.next() else { panic!("iterator did not return value") };
+            assert_eq!(key4, encode_key(&Value::String("DDDDDD".to_string()), docid4).unwrap());
+            assert_eq!(u64::from_le_bytes(val4.try_into().unwrap()), docid4.0);
+
+            assert_eq!(iter.next(), None);
+        }
+
+        // Second index
+        {
+            let mut iter = btree_iterate(collection.indices[1].btree_root, false, &mut page_cache); // bar
+            let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
+            assert_eq!(key1, encode_key(&Value::Number(Number::from_f64(1.2).unwrap()), docid1).unwrap());
+            assert_eq!(u64::from_le_bytes(val1.try_into().unwrap()), docid1.0);
+
+            let Some((key3, val3)) = iter.next() else { panic!("iterator did not return value") };
+            assert_eq!(key3, encode_key(&Value::Number(Number::from_f64(3.4).unwrap()), docid3).unwrap());
+            assert_eq!(u64::from_le_bytes(val3.try_into().unwrap()), docid3.0);
+
+            let Some((key4, val4)) = iter.next() else { panic!("iterator did not return value") };
+            assert_eq!(key4, encode_key(&Value::Number(Number::from_f64(4.5).unwrap()), docid4).unwrap());
+            assert_eq!(u64::from_le_bytes(val4.try_into().unwrap()), docid4.0);
+
+            assert_eq!(iter.next(), None);
+        }
+
+        // Scan main document btree
+        {
+            let mut iter = btree_iterate(collection.document_btree_root, false, &mut page_cache); // bar
+            let Some((key1, _)) = iter.next() else { panic!("iterator did not return value") };
+            assert_eq!(key1, docid1.0.to_be_bytes());
+
+            let Some((key3, _)) = iter.next() else { panic!("iterator did not return value") };
+            assert_eq!(key3, docid3.0.to_be_bytes());
+
+            let Some((key4, _)) = iter.next() else { panic!("iterator did not return value") };
+            assert_eq!(key4, docid4.0.to_be_bytes());
+
+            assert_eq!(iter.next(), None);
+        }
     }
 }
