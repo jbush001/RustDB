@@ -43,7 +43,7 @@ impl FileStore {
 }
 
 impl PersistentStore for FileStore {
-    fn read(&mut self, fpid: FilePageId, page: &mut Page) {
+    fn read(&mut self, fpid: FilePageId, page: &mut PageData) {
         if fpid >= self.length {
             page.fill(0);
             return;
@@ -53,7 +53,7 @@ impl PersistentStore for FileStore {
         self.file.read_exact(page).expect("read failed");
     }
 
-    fn write(&mut self, fpid: FilePageId, page: &Page) {
+    fn write(&mut self, fpid: FilePageId, page: &PageData) {
         self.file.seek(SeekFrom::Start(fpid.0 * PAGE_SIZE as u64)).expect("seek failed");
         self.file.write_all(page).expect("write failed");
         self.length = std::cmp::max(self.length, FilePageId(fpid.0 + 1));
@@ -84,7 +84,7 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
-        let mut temp1: Page = [0; PAGE_SIZE];
+        let mut temp1: PageData = [0; PAGE_SIZE];
         let test_string1 = "abcdefghiklmnopqrstuvwxyz0123456789";
         for (dest, src) in temp1.iter_mut().zip(test_string1.bytes().cycle()) {
             *dest = src;
@@ -92,7 +92,7 @@ mod tests {
 
         store.write(FilePageId(0), &temp1);
 
-        let mut temp2: Page = [0; PAGE_SIZE];
+        let mut temp2: PageData = [0; PAGE_SIZE];
         store.read(FilePageId(0), &mut temp2);
         assert_eq!(&temp2[..test_string1.len()], test_string1.as_bytes());
 
@@ -105,7 +105,7 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
-        let mut temp1: Page = [0; PAGE_SIZE];
+        let mut temp1: PageData = [0; PAGE_SIZE];
         let test_string1 = "abcdefghiklmnopqrstuvwxyz0123456789";
         for (dest, src) in temp1.iter_mut().zip(test_string1.bytes().cycle()) {
             *dest = src;
@@ -124,7 +124,7 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
-        let mut page: Page = [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         store.read(FilePageId(2), &mut page);
         assert_eq!(page, [0u8; PAGE_SIZE]);
     }
@@ -159,7 +159,7 @@ mod tests {
             length: FilePageId(0)
         };
 
-        let mut temp1: Page = [0; PAGE_SIZE];
+        let mut temp1: PageData = [0; PAGE_SIZE];
         store.write(FilePageId(0), &temp1);
         store.read(FilePageId(0), &mut temp1);
     }
@@ -177,7 +177,7 @@ mod tests {
             length: FilePageId(0)
         };
 
-        let page: Page = [0; PAGE_SIZE];
+        let page: PageData = [0; PAGE_SIZE];
         store.write(FilePageId(0), &page);
     }
 }

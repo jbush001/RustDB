@@ -30,14 +30,14 @@ pub struct Superblock {
 
 pub const SUPERBLOCK_FPID: FilePageId = FilePageId(0);
 
-pub fn init_superblock(page: &mut Page) {
+pub fn init_superblock(page: &mut PageData) {
     let block = get_superblock_mut(page);
     block.magic.copy_from_slice(SUPERBLOCK_MAGIC.as_bytes());
     block.free_list_head = 0;
     block.file_size = 1;
 }
 
-pub fn check_superblock(page: &Page) -> Result<(), String> {
+pub fn check_superblock(page: &PageData) -> Result<(), String> {
     let block = get_superblock(page);
     if block.magic != SUPERBLOCK_MAGIC.as_bytes() {
         return Err("Bad Magic".to_string());
@@ -46,11 +46,11 @@ pub fn check_superblock(page: &Page) -> Result<(), String> {
     Ok(())
 }
 
-pub fn get_superblock(page: &Page) -> &Superblock {
+pub fn get_superblock(page: &PageData) -> &Superblock {
     bytemuck::from_bytes(&page[0..mem::size_of::<Superblock>()])
 }
 
-pub fn get_superblock_mut(page: &mut Page) -> &mut Superblock {
+pub fn get_superblock_mut(page: &mut PageData) -> &mut Superblock {
     bytemuck::from_bytes_mut(&mut page[0..mem::size_of::<Superblock>()])
 }
 
@@ -60,13 +60,13 @@ mod tests {
 
     #[test]
     fn test_bad_magic() {
-        let page: Page = [0; PAGE_SIZE];
+        let page: PageData = [0; PAGE_SIZE];
         assert_eq!(check_superblock(&page), Err("Bad Magic".to_string()));
     }
 
     #[test]
     fn test_good_magic() {
-        let mut page: Page = [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_superblock(&mut page);
         assert_eq!(check_superblock(&page), Ok(()));
     }

@@ -17,7 +17,7 @@
 // This is a B+ tree implementation. Values are only stored in the leaf nodes.
 
 use crate::util::*;
-use crate::page_cache::{PageCache, FilePageId, Page, PAGE_SIZE};
+use crate::page_cache::{PageCache, FilePageId, PageData, PAGE_SIZE};
 use crate::page_allocator::{PageAllocator};
 use crate::record_array;
 
@@ -238,7 +238,7 @@ pub fn btree_insert(root_node_fpid: FilePageId,
         } else {
             // Split leaf or interior page.
             let new_page_fpid = page_allocator.alloc();
-            let mut temp: Page = [0; PAGE_SIZE];
+            let mut temp: PageData = [0; PAGE_SIZE];
             let mut new_page = page_cache.lock_page_mut(new_page_fpid);
             let new_parent_key = split_node(&page, &mut new_page, &mut temp);
 
@@ -338,44 +338,44 @@ fn to_hex(bytes: &[u8], mut max_len: usize) -> String {
 }
 
 // Create an empty node
-pub fn init_btree_node(node: &mut Page) {
+pub fn init_btree_node(node: &mut PageData) {
     record_array::init_array(node);
     node[0] = FLAG_LEAF;
 }
 
-fn is_leaf(node: &Page) -> bool {
+fn is_leaf(node: &PageData) -> bool {
     (node[0] & FLAG_LEAF) != 0
 }
 
-fn set_leaf(node: &mut Page) {
+fn set_leaf(node: &mut PageData) {
     node[0] |= FLAG_LEAF;
 }
 
-fn set_not_leaf(node: &mut Page) {
+fn set_not_leaf(node: &mut PageData) {
     node[0] &= !FLAG_LEAF;
 }
 
-fn get_next_sib(node: &Page) -> FilePageId {
+fn get_next_sib(node: &PageData) -> FilePageId {
     FilePageId(get_u64(node, HEADER_NEXT_SIB_OFFS))
 }
 
-fn set_next_sib(node: &mut Page, fpid: FilePageId) {
+fn set_next_sib(node: &mut PageData, fpid: FilePageId) {
     set_u64(&mut node[..], HEADER_NEXT_SIB_OFFS, fpid.0);
 }
 
-fn get_prev_sib(node: &Page) -> FilePageId {
+fn get_prev_sib(node: &PageData) -> FilePageId {
     FilePageId(get_u64(node, HEADER_PREV_SIB_OFFS))
 }
 
-fn set_prev_sib(node: &mut Page, fpid: FilePageId) {
+fn set_prev_sib(node: &mut PageData, fpid: FilePageId) {
     set_u64(&mut node[..], HEADER_PREV_SIB_OFFS, fpid.0);
 }
 
-fn get_right_child(node: &Page) -> FilePageId {
+fn get_right_child(node: &PageData) -> FilePageId {
     FilePageId(get_u64(node, HEADER_RIGHT_CHILD_OFFS))
 }
 
-fn set_right_child(node: &mut Page, fpid: FilePageId) {
+fn set_right_child(node: &mut PageData, fpid: FilePageId) {
     set_u64(&mut node[..], HEADER_RIGHT_CHILD_OFFS, fpid.0);
 }
 
@@ -386,13 +386,13 @@ fn get_entry_size(key: &[u8], value: &[u8]) -> usize {
     key.len() + value.len() + 6
 }
 
-fn get_entry_key(node: &Page, rec_num: usize) -> &[u8] {
+fn get_entry_key(node: &PageData, rec_num: usize) -> &[u8] {
     let rec = record_array::get_record(node, rec_num);
     let key_len = get_u16(rec, 0) as usize;
     &rec[2..2 + key_len]
 }
 
-fn get_entry_value(node: &Page, rec_num: usize) -> &[u8] {
+fn get_entry_value(node: &PageData, rec_num: usize) -> &[u8] {
     let rec = record_array::get_record(node, rec_num);
     let key_len = get_u16(rec, 0) as usize;
     &rec[2 + key_len..]
@@ -408,7 +408,7 @@ fn get_entry_value(node: &Page, rec_num: usize) -> &[u8] {
 // - If it is higher than the highest key, return the number of entries
 //   in the table.
 //
-fn find_key(node: &Page, key: &[u8]) -> usize {
+fn find_key(node: &PageData, key: &[u8]) -> usize {
     let mut low = 0;
     let mut high = record_array::get_num_entries(node);
     while low < high {
@@ -425,7 +425,7 @@ fn find_key(node: &Page, key: &[u8]) -> usize {
 }
 
 // Insert a entry into a single node.
-fn insert_entry(node: &mut Page, key: &[u8], value: &[u8]) {
+fn insert_entry(node: &mut PageData, key: &[u8], value: &[u8]) {
     let index = find_key(node, key);
     assert!(index == record_array::get_num_entries(node) || get_entry_key(node, index) != key,
         "Duplicate key inserted");
@@ -440,7 +440,7 @@ fn insert_entry(node: &mut Page, key: &[u8], value: &[u8]) {
 // Helper function to add entry to next available slot. This assumes the entry is
 // added in order. It also assumes there is adequate space in the node.
 // Returns entry size
-fn append_entry(node: &mut Page, key: &[u8], value: &[u8]) -> usize {
+fn append_entry(node: &mut PageData, key: &[u8], value: &[u8]) -> usize {
     let mut entry: Vec<u8> = Vec::with_capacity(key.len() + value.len() + 2);
     entry.extend_from_slice(&(key.len() as u16).to_le_bytes());
     entry.extend_from_slice(key);
@@ -454,7 +454,7 @@ fn append_entry(node: &mut Page, key: &[u8], value: &[u8]) -> usize {
 // Returns the separator key.
 // NOTE: you must set the right_sibling in the returned out2 to the fpid of out1
 // (we don't know it here)
-fn split_node(orig: &Page, out1: &mut Page, out2: &mut Page) -> Vec<u8> {
+fn split_node(orig: &PageData, out1: &mut PageData, out2: &mut PageData) -> Vec<u8> {
     init_btree_node(out1);
     init_btree_node(out2);
 
@@ -516,7 +516,7 @@ mod tests {
     use std::cmp::{Ord};
     use super::*;
 
-    fn sanity_check_node(node: &Page) {
+    fn sanity_check_node(node: &PageData) {
         // Ensure the keys are in order
         let mut last_key: &[u8] = &[0];
         for i in 0..record_array::get_num_entries(node) {
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_get_key_val() {
-        let mut node: Page = [0; PAGE_SIZE];
+        let mut node: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut node);
 
         append_entry(&mut node, "foobar".as_bytes(), "abcdefghijklmnopqrstuwxyz".as_bytes());
@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     fn test_find_key() {
-        let mut node: Page = [0; PAGE_SIZE];
+        let mut node: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut node);
 
         append_entry(&mut node, "aaaa".as_bytes(), &[0u8]);
@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_find_key_empty() {
-        let mut node: Page = [0; PAGE_SIZE];
+        let mut node: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut node);
 
         assert_eq!(find_key(&node, "foo".as_bytes()), 0);
@@ -575,7 +575,7 @@ mod tests {
     // consistent values.
     #[test]
     fn test_entry_size() {
-        let mut node: Page = [0; PAGE_SIZE];
+        let mut node: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut node);
         let init_free_space = record_array::get_free_space(&node);
         let key1 = "foo".as_bytes();
@@ -596,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_insert_entry() {
-        let mut node: Page = [0; PAGE_SIZE];
+        let mut node: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut node);
 
         // Note these are out of order
@@ -616,7 +616,7 @@ mod tests {
     #[test]
     #[should_panic = "Insufficient space to insert"]
     fn test_insert_entry_full() {
-        let mut node: Page = [0; PAGE_SIZE];
+        let mut node: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut node);
         for i in 0..PAGE_SIZE {
             insert_entry(&mut node, &(i as i64).to_le_bytes(), &[0u8]);
@@ -626,7 +626,7 @@ mod tests {
     #[test]
     #[should_panic = "Duplicate key inserted"]
     fn test_insert_duplicate() {
-        let mut node: Page = [0; PAGE_SIZE];
+        let mut node: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut node);
 
         insert_entry(&mut node, "aardvark".as_bytes(), &[0u8]);
@@ -635,9 +635,9 @@ mod tests {
 
     #[test]
     fn test_split_interior_node() {
-        let mut node1: Page = [0; PAGE_SIZE];
-        let mut node2: Page = [0; PAGE_SIZE];
-        let mut node3: Page = [0; PAGE_SIZE];
+        let mut node1: PageData = [0; PAGE_SIZE];
+        let mut node2: PageData = [0; PAGE_SIZE];
+        let mut node3: PageData = [0; PAGE_SIZE];
 
         init_btree_node(&mut node1);
         node1[0] = 0; // Clear leaf flag
@@ -682,9 +682,9 @@ mod tests {
 
     #[test]
     fn test_split_leaf_node() {
-        let mut node1: Page = [0; PAGE_SIZE];
-        let mut node2: Page = [0; PAGE_SIZE];
-        let mut node3: Page = [0; PAGE_SIZE];
+        let mut node1: PageData = [0; PAGE_SIZE];
+        let mut node2: PageData = [0; PAGE_SIZE];
+        let mut node3: PageData = [0; PAGE_SIZE];
 
         init_btree_node(&mut node1);
 
@@ -722,9 +722,9 @@ mod tests {
     // first node, leaving none in the second (regression test).
     #[test]
     fn test_split_large_leaf() {
-        let mut node1: Page = [0; PAGE_SIZE];
-        let mut node2: Page = [0; PAGE_SIZE];
-        let mut node3: Page = [0; PAGE_SIZE];
+        let mut node1: PageData = [0; PAGE_SIZE];
+        let mut node2: PageData = [0; PAGE_SIZE];
+        let mut node3: PageData = [0; PAGE_SIZE];
 
         init_btree_node(&mut node1);
         insert_entry(&mut node1, &[1u8; 2000], &[1u8, 8]);
@@ -740,7 +740,7 @@ mod tests {
 
     #[test]
     fn test_leaf_flag() {
-        let mut node: Page = [0; PAGE_SIZE];
+        let mut node: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut node);
         assert!(is_leaf(&node));
         node[0] = 0;

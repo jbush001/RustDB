@@ -20,7 +20,7 @@ use std::any::Any;
 
 #[derive(Default)]
 pub struct MockPersistentStore {
-    saved_pages: HashMap<FilePageId, Page>
+    saved_pages: HashMap<FilePageId, PageData>
 }
 
 impl MockPersistentStore {
@@ -32,7 +32,7 @@ impl MockPersistentStore {
 }
 
 impl PersistentStore for MockPersistentStore {
-    fn read(&mut self, fpid: FilePageId, page: &mut Page) {
+    fn read(&mut self, fpid: FilePageId, page: &mut PageData) {
         if self.saved_pages.contains_key(&fpid) {
             page.copy_from_slice(self.saved_pages.get(&fpid).unwrap().as_slice());
         } else {
@@ -40,8 +40,8 @@ impl PersistentStore for MockPersistentStore {
         }
     }
 
-    fn write(&mut self, fpid: FilePageId, page: &Page) {
-        self.saved_pages.insert(fpid, *page.first_chunk::<PAGE_SIZE>().unwrap());
+    fn write(&mut self, fpid: FilePageId, page: &PageData) {
+        self.saved_pages.insert(fpid, *page);
     }
 
     fn sync(&mut self) {
@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn test_read_zeroes() {
         let mut mock = MockPersistentStore::default();
-        let mut temp: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        let mut temp: PageData = [0; PAGE_SIZE];
         mock.read(FilePageId(1), &mut temp);
         assert_eq!(&temp, &[0; PAGE_SIZE]);
     }
@@ -71,15 +71,15 @@ mod tests {
     #[test]
     fn test_readback() {
         let mut mock = MockPersistentStore::default();
-        let mut temp1: [u8; PAGE_SIZE] = [0xcc; PAGE_SIZE];
+        let mut temp1: PageData = [0xcc; PAGE_SIZE];
         mock.write(FilePageId(1), &mut temp1);
 
-        let mut temp2: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        let mut temp2: PageData = [0; PAGE_SIZE];
         mock.read(FilePageId(1), &mut temp2);
         assert_eq!(&temp1, &temp2);
 
         // Ensure other blocks are zero
-        let mut temp3: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        let mut temp3: PageData = [0; PAGE_SIZE];
         mock.read(FilePageId(2), &mut temp3);
         assert_eq!(&[0; PAGE_SIZE], &temp3);
     }

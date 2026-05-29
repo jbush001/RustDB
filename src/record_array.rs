@@ -19,7 +19,7 @@
 // database structures.
 
 use crate::util::*;
-use crate::page_cache::{Page, PAGE_SIZE};
+use crate::page_cache::{PageData, PAGE_SIZE};
 
 // HEADER [32 bytes, fixed]
 // entry_start: u16
@@ -38,23 +38,23 @@ const ENTRY_START_FIELD_OFFS: usize = 32;
 const NUM_ENTRIES_FIELD_OFFS: usize = 34;
 const INDEX_OFFS: usize = 36;
 
-pub fn init_array(page: &mut Page) {
+pub fn init_array(page: &mut PageData) {
     page.fill(0);
     set_u16(&mut page[..], ENTRY_START_FIELD_OFFS, PAGE_SIZE as u16);
 }
 
-pub fn get_num_entries(page: &Page) -> usize {
+pub fn get_num_entries(page: &PageData) -> usize {
     get_u16(page, NUM_ENTRIES_FIELD_OFFS) as usize
 }
 
-pub fn get_free_space(page: &Page) -> usize {
+pub fn get_free_space(page: &PageData) -> usize {
     let index_end = INDEX_OFFS + get_num_entries(page) * 2;
     let entry_start = get_u16(page, ENTRY_START_FIELD_OFFS) as usize;
 
     entry_start - index_end
 }
 
-pub fn insert_record(page: &mut Page, index: usize, value: &[u8]) {
+pub fn insert_record(page: &mut PageData, index: usize, value: &[u8]) {
     assert!(get_free_space(page) >= value.len(), "Insufficient space to insert");
 
     let num_recs = get_num_entries(page);
@@ -79,7 +79,7 @@ pub fn insert_record(page: &mut Page, index: usize, value: &[u8]) {
     page[new_entry_offs + 2..new_entry_offs + 2 + value.len()].copy_from_slice(value);
 }
 
-pub fn delete_record(page: &mut Page, index: usize) {
+pub fn delete_record(page: &mut PageData, index: usize) {
     let total_recs = get_num_entries(page);
     assert!(index < total_recs, "Invalid deletion index");
 
@@ -109,7 +109,7 @@ pub fn delete_record(page: &mut Page, index: usize) {
     set_u16(&mut page[..], ENTRY_START_FIELD_OFFS, (old_entries_start + deleted_entry_len) as u16);
 }
 
-pub fn get_record(page: &Page, index: usize) -> &[u8] {
+pub fn get_record(page: &PageData, index: usize) -> &[u8] {
     let num_recs = get_num_entries(page);
     assert!(index < num_recs, "Record index out of range");
 
@@ -125,7 +125,7 @@ mod tests {
     use rand::{SeedableRng, RngExt};
     use super::*;
 
-    fn sanity_check_record_array(page: &Page) {
+    fn sanity_check_record_array(page: &PageData) {
         let mut sorted_rec_offs: Vec<usize> = Vec::new();
 
         // Walk through the entries, put offss into a list.
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     #[should_panic = "First offset field is incorrect"]
     fn test_sanity_check_bad_offs() {
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
 
         page[ENTRY_START_FIELD_OFFS] += 1; // Adjust start of data field
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     #[should_panic = "Record offset out of range"]
     fn test_sanity_check_offset_out_of_range() {
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
 
         insert_record(&mut page, 0, "aaaaa".as_bytes());
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     #[should_panic = "First record offset is incorrect"]
     fn test_sanity_incorrect_record_offset() {
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
 
         insert_record(&mut page, 0, "a".as_bytes());
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     #[should_panic = "Entries are not packed"]
     fn test_sanity_check_overlapping_entry() {
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
 
         insert_record(&mut page, 0, "a".as_bytes());
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn test_insert_after() {
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
 
         let record1 = "aaaa".as_bytes();
@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn test_insert_before() {
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
 
         let record1 = "aaaa".as_bytes();
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_insert_mid() {
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
 
         let record0 = "aaaa".as_bytes();
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_free_space() {
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
 
         let record1 = "aaaa".as_bytes();
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     #[should_panic = "Insert index out of range"]
     fn test_insert_invalid_index() {
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
 
         let record1 = "aaaa".as_bytes();
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     #[should_panic = "Insufficient space to insert"]
     fn test_out_of_space() {
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
 
         for _ in 0..1024 {
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn test_delete_first() {
         // note entries are out of order
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
         insert_record(&mut page, 0, "apple".as_bytes());
         insert_record(&mut page, 0, "aardvark".as_bytes());
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn test_delete_middle() {
         // note entries are out of order
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
         insert_record(&mut page, 0, "apple".as_bytes());
         insert_record(&mut page, 0, "aardvark".as_bytes());
@@ -365,7 +365,7 @@ mod tests {
     fn test_delete_last() {
         // Remove last entry (zebra)
         // note entries are out of order
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
         insert_record(&mut page, 0, "apple".as_bytes());
         insert_record(&mut page, 0, "aardvark".as_bytes());
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn test_remove_all() {
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
         let capacity = get_free_space(&page);
 
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     #[should_panic = "Invalid deletion index"]
     fn test_delete_bad_index() {
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
         insert_record(&mut page, 0, "aardvark".as_bytes());
         delete_record(&mut page, 1);
@@ -411,7 +411,7 @@ mod tests {
     #[test]
     #[should_panic = "Record index out of range"]
     fn test_get_record_out_of_range() {
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         init_array(&mut page);
         insert_record(&mut page, 0, "aardvark".as_bytes());
         get_record(&mut page, 1);
@@ -427,7 +427,7 @@ mod tests {
         let seed: u64 = 0x12345;
         let mut rng = SmallRng::seed_from_u64(seed);
         let mut oracle: Vec<Vec<u8>> = Vec::new();
-        let mut page: Page= [0; PAGE_SIZE];
+        let mut page: PageData = [0; PAGE_SIZE];
         let mut space_available: usize = 4000; // Rounded down a bit
 
         init_array(&mut page);

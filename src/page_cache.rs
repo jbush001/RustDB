@@ -22,14 +22,15 @@ use std::ops::{Deref, DerefMut};
 use crate::util::*;
 
 pub const PAGE_SIZE: usize = 0x1000;
-pub type Page = [u8; PAGE_SIZE];
+pub type PageData = [u8; PAGE_SIZE];
 
+// This is the index into the file in page size increments.
 #[derive(PartialEq, Ord, PartialOrd, Eq, Debug, Clone, Copy, Hash, Default)]
 pub struct FilePageId(pub u64);
 
 pub trait PersistentStore: Any {
-    fn read(&mut self, fpid: FilePageId, page: &mut Page);
-    fn write(&mut self, fpid: FilePageId, page: &Page);
+    fn read(&mut self, fpid: FilePageId, page: &mut PageData);
+    fn write(&mut self, fpid: FilePageId, page: &PageData);
     fn sync(&mut self);
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -40,12 +41,12 @@ struct CachedPage {
     fpid: Option<FilePageId>,
     ref_count: u32,
     dirty: bool,
-    data: Box<Page>
+    data: Box<PageData>
 }
 
 pub struct PageGuard {
     cache_slot: usize,
-    data: *const Page,
+    data: *const PageData,
     cache: Rc<RefCell<PageCacheInner>>,
 }
 
@@ -56,15 +57,15 @@ impl Drop for PageGuard {
 }
 
 impl Deref for PageGuard {
-    type Target = Page;
-    fn deref(&self) -> &Page {
+    type Target = PageData;
+    fn deref(&self) -> &PageData {
         unsafe { &*self.data }
     }
 }
 
 pub struct PageGuardMut {
     cache_slot: usize,
-    data: *mut Page,
+    data: *mut PageData,
     cache: Rc<RefCell<PageCacheInner>>,
 }
 
@@ -75,15 +76,15 @@ impl Drop for PageGuardMut {
 }
 
 impl Deref for PageGuardMut {
-    type Target = Page;
-    fn deref(&self) -> &Page {
+    type Target = PageData;
+    fn deref(&self) -> &PageData {
         unsafe { &*self.data }
     }
 }
 
 impl DerefMut for PageGuardMut {
-    fn deref_mut(&mut self) -> &mut Page {
-        unsafe { &mut *(self.data as *mut Page) }
+    fn deref_mut(&mut self) -> &mut PageData {
+        unsafe { &mut *(self.data as *mut PageData) }
     }
 }
 
@@ -112,7 +113,7 @@ impl PageCache {
     pub fn lock_page(&self, fpid: FilePageId) -> PageGuard {
         let mut inner = self.inner.borrow_mut();
         let cache_slot = inner.lock_page_internal(fpid, false);
-        let data: *const [u8; PAGE_SIZE] = &*inner.pages[cache_slot].data;
+        let data: *const PageData = &*inner.pages[cache_slot].data;
         PageGuard {
             cache_slot,
             data,
@@ -123,7 +124,7 @@ impl PageCache {
     pub fn lock_page_mut(&self, fpid: FilePageId) -> PageGuardMut {
         let mut inner = self.inner.borrow_mut();
         let cache_slot = inner.lock_page_internal(fpid, true);
-        let data: *mut [u8; PAGE_SIZE] = &mut *inner.pages[cache_slot].data;
+        let data: *mut PageData = &mut *inner.pages[cache_slot].data;
 
         PageGuardMut {
             cache_slot,
@@ -146,7 +147,7 @@ struct Journal {
 }
 
 impl Journal {
-    fn log_page_write(&self, _fpid: FilePageId, _data: &Page) {
+    fn log_page_write(&self, _fpid: FilePageId, _data: &PageData) {
     }
 
     fn committed(&self) {
@@ -314,14 +315,14 @@ mod tests {
     }
 
     impl PersistentStore for MockIOChecker {
-        fn read(&mut self, fpid: FilePageId, page: &mut Page) {
+        fn read(&mut self, fpid: FilePageId, page: &mut PageData) {
             self.read_address = Some(fpid);
             for item in page.iter_mut() {
                 *item = self.read_data;
             }
         }
 
-        fn write(&mut self, fpid: FilePageId, page: &Page) {
+        fn write(&mut self, fpid: FilePageId, page: &PageData) {
             self.write_address = Some(fpid);
             self.write_data = page[0];
         }
@@ -355,7 +356,7 @@ mod tests {
         (mock_io, page_cache)
     }
 
-    // Page cache tests
+    // PageData cache tests
     #[test]
     fn test_pc_lock_two_pages() {
         let (mock_io, page_cache) = setup_cache(5);
@@ -558,7 +559,7 @@ mod tests {
             Rc::new(RefCell::new(MockPersistentStore::default()));
         let page_cache = PageCache::new(CACHE_PAGES, Rc::clone(&mock_io));
         let page_indices: Vec<usize> = (0..TOTAL_PAGES).collect();
-        let mut oracle: Vec<[u8; PAGE_SIZE]> = vec![[0u8; PAGE_SIZE]; TOTAL_PAGES];
+        let mut oracle: Vec<PageData> = vec![[0u8; PAGE_SIZE]; TOTAL_PAGES];
 
         for _ in 0..10000 {
             let _transaction = page_cache.begin_transaction();
