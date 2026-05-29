@@ -314,8 +314,8 @@ mod tests {
         let mut allocator = PageAllocator::new(&mut page_cache);
         let document_btree_root = allocator.alloc();
         {
-            let mut node = page_cache.lock_page_mut(document_btree_root);
-            init_btree_node(&mut node);
+            let mut page = page_cache.lock_page_mut(document_btree_root);
+            init_btree_node(&mut page);
         }
 
         let collection = Collection {
