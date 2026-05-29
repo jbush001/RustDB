@@ -22,7 +22,7 @@ use std::io::{Read, Write, Seek, SeekFrom};
 
 pub struct FileStore {
     file: File,
-    length: u64
+    length: FilePageId
 }
 
 impl FileStore {
@@ -33,7 +33,7 @@ impl FileStore {
             .create(true)
             .truncate(false)
             .open(path)?;
-        let length = file.metadata().unwrap().len();
+        let length = FilePageId(file.metadata().unwrap().len() / PAGE_SIZE as u64);
 
         Ok(Self {
             file,
@@ -43,30 +43,20 @@ impl FileStore {
 }
 
 impl PersistentStore for FileStore {
-    fn read(&mut self, offset: u64, page: &mut Page) {
-        assert!(offset % PAGE_SIZE as u64 == 0);
-        if offset >= self.length {
+    fn read(&mut self, fpid: FilePageId, page: &mut Page) {
+        if fpid >= self.length {
             page.fill(0);
             return;
         }
 
-        self.file.seek(SeekFrom::Start(offset)).expect("seek failed");
-        let available = (self.length - offset) as usize;
-        if available < page.len() {
-            // Partially past EOF — read what exists, zero the rest
-            // TODO should this be an error or something?
-            self.file.read_exact(&mut page[..available]).expect("read failed");
-            page[available..].fill(0);
-        } else {
-            self.file.read_exact(page).expect("read failed");
-        }
+        self.file.seek(SeekFrom::Start(fpid.0 * PAGE_SIZE as u64)).expect("seek failed");
+        self.file.read_exact(page).expect("read failed");
     }
 
-    fn write(&mut self, offset: u64, page: &Page) {
-        assert!(offset % PAGE_SIZE as u64 == 0);
-        self.file.seek(SeekFrom::Start(offset)).expect("seek failed");
+    fn write(&mut self, fpid: FilePageId, page: &Page) {
+        self.file.seek(SeekFrom::Start(fpid.0 * PAGE_SIZE as u64)).expect("seek failed");
         self.file.write_all(page).expect("write failed");
-        self.length = std::cmp::max(self.length, offset + page.len() as u64);
+        self.length = std::cmp::max(self.length, FilePageId(fpid.0 + 1));
     }
 
     fn sync(&mut self) {
@@ -100,10 +90,10 @@ mod tests {
             *dest = src;
         }
 
-        store.write(0, &temp1);
+        store.write(FilePageId(0), &temp1);
 
         let mut temp2: Page = [0; PAGE_SIZE];
-        store.read(0, &mut temp2);
+        store.read(FilePageId(0), &mut temp2);
         assert_eq!(&temp2[..test_string1.len()], test_string1.as_bytes());
 
         let bytes = fs::read(file.path().to_str().unwrap()).unwrap();
@@ -121,7 +111,7 @@ mod tests {
             *dest = src;
         }
 
-        store.write(0, &temp1);
+        store.write(FilePageId(0), &temp1);
         store.sync();
 
         let bytes = fs::read(file.path().to_str().unwrap()).unwrap();
@@ -135,7 +125,7 @@ mod tests {
         let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
         let mut page: Page = [0; PAGE_SIZE];
-        store.read(0x2000, &mut page);
+        store.read(FilePageId(2), &mut page);
         assert_eq!(page, [0u8; PAGE_SIZE]);
     }
 
@@ -166,12 +156,12 @@ mod tests {
             .open("/dev/null").unwrap();
         let mut store = FileStore {
             file,
-            length: 0
+            length: FilePageId(0)
         };
 
         let mut temp1: Page = [0; PAGE_SIZE];
-        store.write(0, &temp1);
-        store.read(0, &mut temp1);
+        store.write(FilePageId(0), &temp1);
+        store.read(FilePageId(0), &mut temp1);
     }
 
     #[test]
@@ -184,10 +174,10 @@ mod tests {
             .open(file.path().to_str().unwrap()).unwrap();
         let mut store = FileStore {
             file,
-            length: 0
+            length: FilePageId(0)
         };
 
         let page: Page = [0; PAGE_SIZE];
-        store.write(0, &page);
+        store.write(FilePageId(0), &page);
     }
 }

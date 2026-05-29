@@ -24,17 +24,15 @@ use crate::util::*;
 pub const PAGE_SIZE: usize = 0x1000;
 pub type Page = [u8; PAGE_SIZE];
 
-#[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
+#[derive(PartialEq, Ord, PartialOrd, Eq, Debug, Clone, Copy, Hash, Default)]
 pub struct FilePageId(pub u64);
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub struct CachePageId(pub usize);
 
-// TODO: this uses the byte offset into a file instead of a page
-// number (FilePageId). Evaluate changing this to be consistent.
 pub trait PersistentStore: Any {
-    fn read(&mut self, offset: u64, page: &mut Page);
-    fn write(&mut self, offset: u64, page: &Page);
+    fn read(&mut self, fpid: FilePageId, page: &mut Page);
+    fn write(&mut self, fpid: FilePageId, page: &Page);
     fn sync(&mut self);
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -42,7 +40,7 @@ pub trait PersistentStore: Any {
 
 #[derive(Debug, Clone)]
 struct CachedPage {
-    file_page: Option<FilePageId>,
+    fpid: Option<FilePageId>,
     ref_count: u32,
     dirty: bool,
     data: Box<Page>
@@ -101,7 +99,6 @@ impl Drop for TransactionGuard {
         self.cache.borrow_mut().end_transaction();
     }
 }
-
 
 #[derive(Clone)]
 pub struct PageCache {
@@ -178,7 +175,7 @@ impl PageCacheInner {
 
         PageCacheInner {
             page_map: HashMap::new(),
-            pages: vec![CachedPage{file_page: None, ref_count: 0, dirty: false, data: Box::new([0u8; PAGE_SIZE])}; size],
+            pages: vec![CachedPage{fpid: None, ref_count: 0, dirty: false, data: Box::new([0u8; PAGE_SIZE])}; size],
             lru,
             persistent_store,
             transaction_active: false,
@@ -217,18 +214,17 @@ impl PageCacheInner {
                         // The cache is write-through, so we never have dirty pages
                         // sitting around.
                         let cp = &mut self.pages[index];
-                        match cp.file_page {
+                        match cp.fpid {
                             Some(fpid) => self.page_map.remove(&fpid),
                             None => None // this page has never been loaded, nothing to remove
                         };
                         self.page_map.insert(fpid, CachePageId(index));
-                        cp.file_page = Some(fpid);
+                        cp.fpid = Some(fpid);
                         cp.ref_count = 1;
                         cp.dirty = writable;
 
                         // Read data into page
-                        let file_offset = fpid.0 * PAGE_SIZE as u64;
-                        self.persistent_store.borrow_mut().read(file_offset,
+                        self.persistent_store.borrow_mut().read(fpid,
                             &mut *self.pages[index].data);
 
                         CachePageId(index)
@@ -266,7 +262,7 @@ impl PageCacheInner {
         for index in &self.dirty_page_list {
             let cached_page = &mut self.pages[index];
             assert!(cached_page.ref_count == 0);
-            self.journal.log_page_write(cached_page.file_page.unwrap(), &cached_page.data);
+            self.journal.log_page_write(cached_page.fpid.unwrap(), &cached_page.data);
 
             // TODO write to circular buffer
 
@@ -278,8 +274,7 @@ impl PageCacheInner {
         while !self.dirty_page_list.empty() {
             let index = self.dirty_page_list.pop_tail().unwrap();
             let cached_page = &mut self.pages[index];
-            let file_offset = cached_page.file_page.unwrap().0 * PAGE_SIZE as u64;
-            store.write(file_offset, &*self.pages[index].data);
+            store.write(cached_page.fpid.unwrap(), &*self.pages[index].data);
             self.pages[index].dirty = false;
             self.lru.push_head(index);
         }
@@ -306,37 +301,31 @@ mod tests {
 
     #[derive(Default)]
     struct MockIOChecker {
-        read_called: bool,
-        read_address: u64,
+        read_address: Option<FilePageId>,
         read_data: u8,
-        write_called: bool,
-        write_address: u64,
+        write_address: Option<FilePageId>,
         write_data: u8
     }
 
     impl MockIOChecker {
         fn reset(&mut self) {
-            self.read_called = false;
-            self.read_address = 0;
+            self.read_address = None;
             self.read_data = 0;
-            self.write_called = false;
-            self.write_address = 0;
+            self.write_address = None;
             self.write_data = 0;
         }
     }
 
     impl PersistentStore for MockIOChecker {
-        fn read(&mut self, offset: u64, page: &mut Page) {
-            self.read_called = true;
-            self.read_address = offset;
+        fn read(&mut self, fpid: FilePageId, page: &mut Page) {
+            self.read_address = Some(fpid);
             for item in page.iter_mut() {
                 *item = self.read_data;
             }
         }
 
-        fn write(&mut self, offset: u64, page: &Page) {
-            self.write_called = true;
-            self.write_address = offset;
+        fn write(&mut self, fpid: FilePageId, page: &Page) {
+            self.write_address = Some(fpid);
             self.write_data = page[0];
         }
 
@@ -383,8 +372,7 @@ mod tests {
         {
             let guard = page_cache.lock_page(FilePageId(3));
             with_mock(&mock_io, |m| {
-                assert!(m.read_called);
-                assert_eq!(m.read_address, 0x3000);
+                assert_eq!(m.read_address, Some(FilePageId(3)));
             });
 
             assert_eq!((*guard)[0], 3);
@@ -398,8 +386,7 @@ mod tests {
 
         let guard = page_cache.lock_page(FilePageId(4));
         with_mock(&mock_io, |m| {
-            assert!(m.read_called);
-            assert_eq!(m.read_address, 0x4000);
+            assert_eq!(m.read_address, Some(FilePageId(4)));
         });
 
         assert_eq!((*guard)[0], 4);
@@ -409,7 +396,7 @@ mod tests {
         {
             let guard = page_cache.lock_page(FilePageId(3));
             with_mock(&mock_io, |m| {
-                assert!(!m.read_called);
+                assert!(m.read_address.is_none());
             });
 
             assert_eq!((*guard)[0], 3);
@@ -433,8 +420,7 @@ mod tests {
         with_mock_mut(&mock_io, |m| m.reset());
         page_cache.lock_page(FilePageId(3));
         with_mock(&mock_io, |m| {
-            assert!(m.read_called);
-            assert_eq!(m.read_address, 0x3000);
+            assert_eq!(m.read_address, Some(FilePageId(3)));
         });
 
         // Ensure page 5 is still in the cache and didn't get
@@ -442,7 +428,7 @@ mod tests {
         with_mock_mut(&mock_io, |m| m.reset());
         page_cache.lock_page(FilePageId(5));
         with_mock(&mock_io, |m| {
-            assert!(!m.read_called);
+            assert!(m.read_address.is_none());
         });
     }
 
@@ -462,8 +448,7 @@ mod tests {
 
         // Unlocking will cause a writeback.
         with_mock(&mock_io, |m| {
-            assert!(m.write_called);
-            assert_eq!(m.write_address, 0x3000);
+            assert_eq!(m.write_address, Some(FilePageId(3)));
 
             // We only check the first byte, but ensure it is updated correctly.
             assert_eq!(m.write_data, WRITE_VAL);
@@ -496,8 +481,7 @@ mod tests {
 
         // Unlocking will cause a writeback.
         with_mock(&mock_io, |m| {
-            assert!(m.write_called);
-            assert_eq!(m.write_address, 0x3000);
+            assert_eq!(m.write_address, Some(FilePageId(3)));
 
             // We only check the first byte, but ensure it is updated correctly.
             assert_eq!(m.write_data, WRITE_VAL);
@@ -517,14 +501,13 @@ mod tests {
         drop(guard2);
 
         with_mock(&mock_io, |m| {
-            assert!(!m.write_called);
+            assert!(m.write_address.is_none());
         });
 
         drop(transaction);
 
         with_mock(&mock_io, |m| {
-            assert!(m.write_called);
-            assert_eq!(m.write_address, 0x3000);
+            assert_eq!(m.write_address, Some(FilePageId(3)));
         });
     }
 
@@ -550,7 +533,7 @@ mod tests {
         }
 
         with_mock(&mock_io, |m| {
-            assert!(!m.write_called);
+            assert!(m.write_address.is_none());
         });
 
         // Now ensure we can do another write transaction with no issues.
@@ -562,8 +545,7 @@ mod tests {
         }
 
         with_mock(&mock_io, |m| {
-            assert!(m.write_called);
-            assert_eq!(m.write_address, 0x3000);
+            assert_eq!(m.write_address, Some(FilePageId(3)));
             assert_eq!(m.write_data, WRITE_VAL);
         });
     }
