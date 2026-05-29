@@ -223,7 +223,7 @@ impl PageCacheInner {
 
                         // Read data into page
                         self.persistent_store.borrow_mut().read(fpid,
-                            &mut *self.pages[index].data);
+                            &mut self.pages[index].data);
 
                         index
                     }
@@ -272,7 +272,7 @@ impl PageCacheInner {
         while !self.dirty_page_list.empty() {
             let index = self.dirty_page_list.pop_tail().unwrap();
             let cached_page = &mut self.pages[index];
-            store.write(cached_page.fpid.unwrap(), &*self.pages[index].data);
+            store.write(cached_page.fpid.unwrap(), &self.pages[index].data);
             self.pages[index].dirty = false;
             self.lru.push_head(index);
         }
