@@ -38,15 +38,18 @@ struct Collection {
 }
 
 //
-// Encode a database value and its associated 64-bit document ID into a
-// byte array that preserves the natural sort order under raw byte
-// comparison and ensures keys in the BTree are unique.
+// Converts a database field value into a byte array suitable for use as a
+// B-tree key. B-tree keys must conform to two rules:
+//   1. They must be unique.
+//   2. Lexicographic byte order must match logical value order.
 //
-// The underlying B-Tree treats keys as opaque byte arrays, and requires them
-// to be unique. However, our indexed fields are often not unique. To resolve
-// this, this function appends the document ID to serve as a deterministic
-// tie-breaker in a way that doesn't break the sort order of the original data.
-// This function is basically one-way and is not intended to be decoded.
+// To satisfy (1), we append the document ID as a tiebreaker. For (2), we
+// convert non-lexicographic types: floats as sign-magnitude ordered binary,
+// integers as unsigned offset binary. Strings are already in lexicographic
+// order, but since they are variable-length, the document ID must be
+// separated with a zero byte to preserve the sort order.
+//
+// Note: this encoding is one-way and not intended to be decoded.
 //
 fn encode_key(key: &Value, docid: DocID) -> Option<Vec<u8>> {
     // Prepend a tag in the event key types are mixed in an index.
@@ -60,10 +63,12 @@ fn encode_key(key: &Value, docid: DocID) -> Option<Vec<u8>> {
             vec![TAG_BOOL, if *b {1u8} else {0u8}]
         },
         Value::Number(n) => {
+            // All encoded numbers are treated as bigendian
             if let Some(i) = n.as_i64() {
-                // Store as bigendian
                 let mut bytes = i.to_be_bytes();
-                bytes[0] ^= 0x80; // Flip the sign to ensure negative values sort before positive
+                // Flip the sign to ensure negative values sort before positive
+                // (the negative values already are in lexicographic order)
+                bytes[0] ^= 0x80;
                 let mut v = vec![TAG_INT];
                 v.extend_from_slice(&bytes);
                 v
@@ -281,13 +286,14 @@ fn lookup_field(path: &FieldPath, record: &Value)
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
-    use std::cell::RefCell;
     use crate::page_cache::*;
     use crate::mocks::{MockPersistentStore};
-    use serde_json::{Value, json, Number};
     use crate::btree::*;
     use crate::superblock::*;
+    use std::rc::Rc;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use serde_json::{Value, json, Number, Map};
     use super::*;
 
     fn create_document(index: usize) -> Value {
@@ -320,6 +326,56 @@ mod tests {
         };
 
         (page_cache, allocator, collection)
+    }
+
+    #[test]
+    fn test_key_encodings() {
+        assert!(encode_key(&json!("abc"), DocID(0)).unwrap() <
+            encode_key(&json!("abcd"), DocID(0)).unwrap());
+        assert!(&encode_key(&json!("abce"), DocID(0)).unwrap() >
+            &encode_key(&json!("abcd"), DocID(0)).unwrap());
+
+        // Ensure docID doesn't break sort order
+        assert!(&encode_key(&json!("abc"), DocID(0xffffffff_ffffffff)).unwrap() <
+            &encode_key(&json!("abcd"), DocID(0)).unwrap());
+
+        // DocID as tiebreaker with dups
+        assert!(&encode_key(&json!("abc"), DocID(1)).unwrap() >
+            &encode_key(&json!("abc"), DocID(0)).unwrap());
+
+        // Floating point
+        assert!(&encode_key(&json!(123.5), DocID(0)).unwrap() >
+            &encode_key(&json!(123.4), DocID(0)).unwrap());
+        assert!(&encode_key(&json!(-1024.5), DocID(0)).unwrap() <
+            &encode_key(&json!(123.5), DocID(0)).unwrap());
+        assert!(&encode_key(&json!(-1024.5), DocID(0)).unwrap() <
+            &encode_key(&json!(-1023.5), DocID(0)).unwrap());
+
+        // Integer
+        assert!(&encode_key(&json!(100), DocID(0)).unwrap()
+            > &encode_key(&json!(99), DocID(0)).unwrap());
+        assert!(&encode_key(&json!(-100), DocID(0)).unwrap()
+            < &encode_key(&json!(99), DocID(0)).unwrap());
+        assert!(&encode_key(&json!(-100), DocID(0)).unwrap()
+            < &encode_key(&json!(-99), DocID(0)).unwrap());
+
+        // Boolean
+        assert!(&encode_key(&json!(true), DocID(0)).unwrap() >
+            &encode_key(&json!(false), DocID(0)).unwrap());
+
+        // Mixed types
+        assert!(&encode_key(&json!(true), DocID(0)).unwrap() <
+            &encode_key(&json!(-223.4), DocID(0)).unwrap());
+        assert!(&encode_key(&json!(22.4), DocID(0)).unwrap() >
+            &encode_key(&json!(100), DocID(0)).unwrap());
+        assert!(&encode_key(&json!(100), DocID(0)).unwrap() >
+            &encode_key(&json!(true), DocID(0)).unwrap());
+    }
+
+    #[test]
+    fn test_encode_key_invalid() {
+        assert_eq!(encode_key(&json!({"foo": "bar"}), DocID(0)), None);
+        assert_eq!(encode_key(&json!([1,2,3,4,5]), DocID(0)), None);
     }
 
     #[test]
