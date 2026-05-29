@@ -55,7 +55,7 @@ impl PageAllocator {
             let result = self.free_list_head;
             {
                 let page = self.page_cache.lock_page(self.free_list_head);
-                self.free_list_head = FilePageId(get_u64(&page, 0));
+                self.free_list_head = FilePageId(get_u64(&page[..], 0));
             }
 
             let mut page = self.page_cache.lock_page_mut(SUPERBLOCK_FPID);
@@ -78,7 +78,7 @@ impl PageAllocator {
     pub fn free(&mut self, fpid: FilePageId) {
         {
             let mut page = self.page_cache.lock_page_mut(fpid);
-            set_u64(&mut page, 0, self.free_list_head.0);
+            set_u64(&mut page[..], 0, self.free_list_head.0);
             self.free_list_head = fpid;
         }
 

@@ -21,7 +21,8 @@ use std::any::Any;
 use std::ops::{Deref, DerefMut};
 use crate::util::*;
 
-pub const PAGE_SIZE: usize = 4096;
+pub const PAGE_SIZE: usize = 0x1000;
+pub type Page = [u8; PAGE_SIZE];
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
 pub struct FilePageId(pub u64);
@@ -29,9 +30,11 @@ pub struct FilePageId(pub u64);
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub struct CachePageId(pub usize);
 
+// TODO: this uses the byte offset into a file instead of a page
+// number (FilePageId). Evaluate changing this to be consistent.
 pub trait PersistentStore: Any {
-    fn read(&mut self, offset: u64, slice: &mut [u8]);
-    fn write(&mut self, offset: u64, slice: &[u8]);
+    fn read(&mut self, offset: u64, page: &mut Page);
+    fn write(&mut self, offset: u64, page: &Page);
     fn sync(&mut self);
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -42,12 +45,12 @@ struct CachedPage {
     file_page: Option<FilePageId>,
     ref_count: u32,
     dirty: bool,
-    data: Box<[u8; PAGE_SIZE]>
+    data: Box<Page>
 }
 
 pub struct PageGuard {
     cpid: CachePageId,
-    data: *const [u8; PAGE_SIZE],
+    data: *const Page,
     cache: Rc<RefCell<PageCacheInner>>,
 }
 
@@ -58,15 +61,15 @@ impl Drop for PageGuard {
 }
 
 impl Deref for PageGuard {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        unsafe { (*self.data).as_slice() }
+    type Target = Page;
+    fn deref(&self) -> &Page {
+        unsafe { &*self.data }
     }
 }
 
 pub struct PageGuardMut {
     cpid: CachePageId,
-    data: *mut [u8; PAGE_SIZE],
+    data: *mut Page,
     cache: Rc<RefCell<PageCacheInner>>,
 }
 
@@ -77,15 +80,15 @@ impl Drop for PageGuardMut {
 }
 
 impl Deref for PageGuardMut {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        unsafe { (*self.data).as_slice() }
+    type Target = Page;
+    fn deref(&self) -> &Page {
+        unsafe { &*self.data }
     }
 }
 
 impl DerefMut for PageGuardMut {
-    fn deref_mut(&mut self) -> &mut [u8] {
-        unsafe { (*self.data).as_mut_slice() }
+    fn deref_mut(&mut self) -> &mut Page {
+        unsafe { &mut *(self.data as *mut Page) }
     }
 }
 
@@ -149,7 +152,7 @@ struct Journal {
 }
 
 impl Journal {
-    fn log_page_write(&self, _fpid: FilePageId, _data: &[u8]) {
+    fn log_page_write(&self, _fpid: FilePageId, _data: &Page) {
     }
 
     fn committed(&self) {
@@ -263,7 +266,7 @@ impl PageCacheInner {
         for index in &self.dirty_page_list {
             let cached_page = &mut self.pages[index];
             assert!(cached_page.ref_count == 0);
-            self.journal.log_page_write(cached_page.file_page.unwrap(), &cached_page.data[..]);
+            self.journal.log_page_write(cached_page.file_page.unwrap(), &cached_page.data);
 
             // TODO write to circular buffer
 
@@ -323,18 +326,18 @@ mod tests {
     }
 
     impl PersistentStore for MockIOChecker {
-        fn read(&mut self, offset: u64, slice: &mut [u8]) {
+        fn read(&mut self, offset: u64, page: &mut Page) {
             self.read_called = true;
             self.read_address = offset;
-            for item in slice.iter_mut() {
+            for item in page.iter_mut() {
                 *item = self.read_data;
             }
         }
 
-        fn write(&mut self, offset: u64, slice: &[u8]) {
+        fn write(&mut self, offset: u64, page: &Page) {
             self.write_called = true;
             self.write_address = offset;
-            self.write_data = slice[0];
+            self.write_data = page[0];
         }
 
         fn sync(&mut self) {}

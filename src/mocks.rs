@@ -20,7 +20,7 @@ use std::any::Any;
 
 #[derive(Default)]
 pub struct MockPersistentStore {
-    saved_pages: HashMap<u64, [u8; PAGE_SIZE]>
+    saved_pages: HashMap<u64, Page>
 }
 
 impl MockPersistentStore {
@@ -32,22 +32,22 @@ impl MockPersistentStore {
 }
 
 impl PersistentStore for MockPersistentStore {
-    fn read(&mut self, offset: u64, slice: &mut [u8]) {
+    fn read(&mut self, offset: u64, page: &mut Page) {
         assert_eq!((offset as usize % PAGE_SIZE), 0, "Only page aligned IO supported");
-        assert_eq!(slice.len(), PAGE_SIZE, "Only page size IO supported");
+        assert_eq!(page.len(), PAGE_SIZE, "Only page size IO supported");
 
         if self.saved_pages.contains_key(&offset) {
-            slice.copy_from_slice(self.saved_pages.get(&offset).unwrap().as_slice());
+            page.copy_from_slice(self.saved_pages.get(&offset).unwrap().as_slice());
         } else {
-            slice.fill(0);
+            page.fill(0);
         }
     }
 
-    fn write(&mut self, offset: u64, slice: &[u8]) {
+    fn write(&mut self, offset: u64, page: &Page) {
         assert_eq!((offset as usize % PAGE_SIZE), 0, "Only page aligned IO supported");
-        assert_eq!(slice.len(), PAGE_SIZE, "Only page size IO supported");
+        assert_eq!(page.len(), PAGE_SIZE, "Only page size IO supported");
 
-        self.saved_pages.insert(offset, *slice.first_chunk::<PAGE_SIZE>().unwrap());
+        self.saved_pages.insert(offset, *page.first_chunk::<PAGE_SIZE>().unwrap());
     }
 
     fn sync(&mut self) {
@@ -69,32 +69,32 @@ mod tests {
     #[test]
     fn test_read_zeroes() {
         let mut mock = MockPersistentStore::default();
-        let mut temp: [u8; 0x1000] = [0; 0x1000];
-        mock.read(0x1000u64, &mut temp);
-        assert_eq!(&temp, &[0; 0x1000]);
+        let mut temp: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        mock.read(PAGE_SIZE as u64, &mut temp);
+        assert_eq!(&temp, &[0; PAGE_SIZE]);
     }
 
     #[test]
     fn test_readback() {
         let mut mock = MockPersistentStore::default();
-        let mut temp1: [u8; 0x1000] = [0xcc; 0x1000];
-        mock.write(0x1000u64, &mut temp1);
+        let mut temp1: [u8; PAGE_SIZE] = [0xcc; PAGE_SIZE];
+        mock.write(PAGE_SIZE as u64, &mut temp1);
 
-        let mut temp2: [u8; 0x1000] = [0; 0x1000];
-        mock.read(0x1000u64, &mut temp2);
+        let mut temp2: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        mock.read(PAGE_SIZE as u64, &mut temp2);
         assert_eq!(&temp1, &temp2);
 
         // Ensure other blocks are zero
-        let mut temp3: [u8; 0x1000] = [0; 0x1000];
-        mock.read(0x2000u64, &mut temp3);
-        assert_eq!(&[0; 0x1000], &temp3);
+        let mut temp3: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        mock.read((PAGE_SIZE * 2) as u64, &mut temp3);
+        assert_eq!(&[0; PAGE_SIZE], &temp3);
     }
 
     #[test]
     #[should_panic = "Only page aligned IO supported"]
     fn test_unaligned_read() {
         let mut mock = MockPersistentStore::default();
-        let mut temp: [u8; 0x1000] = [0; 0x1000];
+        let mut temp: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
         mock.read(0x1001u64, &mut temp);
     }
 
@@ -102,24 +102,8 @@ mod tests {
     #[should_panic = "Only page aligned IO supported"]
     fn test_unaligned_write() {
         let mut mock = MockPersistentStore::default();
-        let mut temp: [u8; 0x1000] = [0; 0x1000];
+        let mut temp: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
         mock.write(0x1001u64, &mut temp);
-    }
-
-    #[test]
-    #[should_panic = "Only page size IO supported"]
-    fn test_bad_read_size() {
-        let mut mock = MockPersistentStore::default();
-        let mut temp: [u8; 0x1001] = [0; 0x1001];
-        mock.read(0x1000u64, &mut temp);
-    }
-
-    #[test]
-    #[should_panic = "Only page size IO supported"]
-    fn test_bad_write_size() {
-        let mut mock = MockPersistentStore::default();
-        let mut temp: [u8; 0x1001] = [0; 0x1001];
-        mock.write(0x1000u64, &mut temp);
     }
 
     #[test]

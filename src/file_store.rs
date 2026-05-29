@@ -43,27 +43,30 @@ impl FileStore {
 }
 
 impl PersistentStore for FileStore {
-    fn read(&mut self, offset: u64, slice: &mut [u8]) {
+    fn read(&mut self, offset: u64, page: &mut Page) {
+        assert!(offset % PAGE_SIZE as u64 == 0);
         if offset >= self.length {
-            slice.fill(0);
+            page.fill(0);
             return;
         }
 
         self.file.seek(SeekFrom::Start(offset)).expect("seek failed");
         let available = (self.length - offset) as usize;
-        if available < slice.len() {
+        if available < page.len() {
             // Partially past EOF — read what exists, zero the rest
-            self.file.read_exact(&mut slice[..available]).expect("read failed");
-            slice[available..].fill(0);
+            // TODO should this be an error or something?
+            self.file.read_exact(&mut page[..available]).expect("read failed");
+            page[available..].fill(0);
         } else {
-            self.file.read_exact(slice).expect("read failed");
+            self.file.read_exact(page).expect("read failed");
         }
     }
 
-    fn write(&mut self, offset: u64, slice: &[u8]) {
+    fn write(&mut self, offset: u64, page: &Page) {
+        assert!(offset % PAGE_SIZE as u64 == 0);
         self.file.seek(SeekFrom::Start(offset)).expect("seek failed");
-        self.file.write_all(slice).expect("write failed");
-        self.length = std::cmp::max(self.length, offset + slice.len() as u64);
+        self.file.write_all(page).expect("write failed");
+        self.length = std::cmp::max(self.length, offset + page.len() as u64);
     }
 
     fn sync(&mut self) {
@@ -91,16 +94,20 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
-        store.write(0, &"abcdefghiklmnopqrstuvwxyz0123456789".as_bytes());
+        let mut temp1: Page = [0; PAGE_SIZE];
+        let test_string1 = "abcdefghiklmnopqrstuvwxyz0123456789";
+        for (dest, src) in temp1.iter_mut().zip(test_string1.bytes().cycle()) {
+            *dest = src;
+        }
 
-        let mut buf: [u8; 16] = [0; 16];
-        store.read(8, &mut buf);
-        assert_eq!(buf, "iklmnopqrstuvwxy".as_bytes());
+        store.write(0, &temp1);
 
-        store.write(12, &"-!@#$%^&*()".as_bytes());
+        let mut temp2: Page = [0; PAGE_SIZE];
+        store.read(0, &mut temp2);
+        assert_eq!(&temp2[..test_string1.len()], test_string1.as_bytes());
 
-        let content = fs::read_to_string(file.path().to_str().unwrap()).unwrap();
-        assert_eq!(content, "abcdefghiklm-!@#$%^&*()yz0123456789");
+        let bytes = fs::read(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(bytes, temp1);
     }
 
     #[test]
@@ -108,12 +115,18 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
-        store.write(0, &"abcdefgh".as_bytes());
+        let mut temp1: Page = [0; PAGE_SIZE];
+        let test_string1 = "abcdefghiklmnopqrstuvwxyz0123456789";
+        for (dest, src) in temp1.iter_mut().zip(test_string1.bytes().cycle()) {
+            *dest = src;
+        }
+
+        store.write(0, &temp1);
         store.sync();
 
-        let mut buf: [u8; 8] = [0; 8];
-        store.read(0, &mut buf);
-        assert_eq!(buf, "abcdefgh".as_bytes());
+        let bytes = fs::read(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(bytes.len(), PAGE_SIZE);
+        assert_eq!(bytes, temp1);
     }
 
     #[test]
@@ -121,26 +134,9 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
-        store.write(0, &[1u8, 2, 3, 4, 5, 6, 7, 8, 9]);
-
-        let mut buf: [u8; 10] = [0xff; 10];
-        store.read(5, &mut buf);
-        assert_eq!(buf, [6u8, 7, 8, 9, 0, 0, 0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn test_read_completely_past_end() {
-        let file = NamedTempFile::new().unwrap();
-        let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
-
-        let mut buf: [u8; 10] = [0xff; 10];
-        store.read(100, &mut buf);
-        assert_eq!(buf, [0u8; 10]);
-
-        // For coverage, read exactly at end
-        let mut buf: [u8; 10] = [0xff; 10];
-        store.read(110, &mut buf);
-        assert_eq!(buf, [0u8; 10]);
+        let mut page: Page = [0; PAGE_SIZE];
+        store.read(0x2000, &mut page);
+        assert_eq!(page, [0u8; PAGE_SIZE]);
     }
 
     #[test]
@@ -173,9 +169,9 @@ mod tests {
             length: 0
         };
 
-        let mut buf: [u8; 16] = [0; 16];
-        store.write(8, &buf);
-        store.read(8, &mut buf);
+        let mut temp1: Page = [0; PAGE_SIZE];
+        store.write(0, &temp1);
+        store.read(0, &mut temp1);
     }
 
     #[test]
@@ -191,7 +187,7 @@ mod tests {
             length: 0
         };
 
-        let buf: [u8; 16] = [0; 16];
-        store.write(8, &buf);
+        let page: Page = [0; PAGE_SIZE];
+        store.write(0, &page);
     }
 }
