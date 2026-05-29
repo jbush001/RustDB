@@ -617,7 +617,7 @@ mod tests {
     #[test]
     #[should_panic = "Insufficient space to insert"]
     fn test_insert_entry_full() {
-        let mut node = vec![0u8; 4096]; // XXX was crashing on unaligned pointer.
+        let mut node: [u8; 4096] = [0; 4096];
         init_btree_node(&mut node);
         for i in 0..4096 {
             insert_entry(&mut node, &(i as i64).to_le_bytes(), &[0u8]);

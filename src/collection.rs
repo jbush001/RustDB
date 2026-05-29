@@ -292,8 +292,7 @@ mod tests {
     use crate::superblock::*;
     use std::rc::Rc;
     use std::cell::RefCell;
-    use std::collections::HashMap;
-    use serde_json::{Value, json, Number, Map};
+    use serde_json::{Value, json, Number};
     use super::*;
 
     fn create_document(index: usize) -> Value {
