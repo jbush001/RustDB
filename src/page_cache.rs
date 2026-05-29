@@ -27,9 +27,6 @@ pub type Page = [u8; PAGE_SIZE];
 #[derive(PartialEq, Ord, PartialOrd, Eq, Debug, Clone, Copy, Hash, Default)]
 pub struct FilePageId(pub u64);
 
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
-pub struct CachePageId(pub usize);
-
 pub trait PersistentStore: Any {
     fn read(&mut self, fpid: FilePageId, page: &mut Page);
     fn write(&mut self, fpid: FilePageId, page: &Page);
@@ -47,14 +44,14 @@ struct CachedPage {
 }
 
 pub struct PageGuard {
-    cpid: CachePageId,
+    cache_slot: usize,
     data: *const Page,
     cache: Rc<RefCell<PageCacheInner>>,
 }
 
 impl Drop for PageGuard {
     fn drop(&mut self) {
-        self.cache.borrow_mut().unlock_page(self.cpid);
+        self.cache.borrow_mut().unlock_page(self.cache_slot);
     }
 }
 
@@ -66,14 +63,14 @@ impl Deref for PageGuard {
 }
 
 pub struct PageGuardMut {
-    cpid: CachePageId,
+    cache_slot: usize,
     data: *mut Page,
     cache: Rc<RefCell<PageCacheInner>>,
 }
 
 impl Drop for PageGuardMut {
     fn drop(&mut self) {
-        self.cache.borrow_mut().unlock_page(self.cpid);
+        self.cache.borrow_mut().unlock_page(self.cache_slot);
     }
 }
 
@@ -114,10 +111,10 @@ impl PageCache {
 
     pub fn lock_page(&self, fpid: FilePageId) -> PageGuard {
         let mut inner = self.inner.borrow_mut();
-        let cpid = inner.lock_page_internal(fpid, false);
-        let data: *const [u8; PAGE_SIZE] = &*inner.pages[cpid.0].data;
+        let cache_slot = inner.lock_page_internal(fpid, false);
+        let data: *const [u8; PAGE_SIZE] = &*inner.pages[cache_slot].data;
         PageGuard {
-            cpid,
+            cache_slot,
             data,
             cache: Rc::clone(&self.inner)
         }
@@ -125,11 +122,11 @@ impl PageCache {
 
     pub fn lock_page_mut(&self, fpid: FilePageId) -> PageGuardMut {
         let mut inner = self.inner.borrow_mut();
-        let cpid = inner.lock_page_internal(fpid, true);
-        let data: *mut [u8; PAGE_SIZE] = &mut *inner.pages[cpid.0].data;
+        let cache_slot = inner.lock_page_internal(fpid, true);
+        let data: *mut [u8; PAGE_SIZE] = &mut *inner.pages[cache_slot].data;
 
         PageGuardMut {
-            cpid,
+            cache_slot,
             data,
             cache: Rc::clone(&self.inner)
         }
@@ -157,7 +154,7 @@ impl Journal {
 }
 
 struct PageCacheInner {
-    page_map: HashMap<FilePageId, CachePageId>,
+    page_map: HashMap<FilePageId, usize>,
     pages: Vec<CachedPage>,
     lru: IndexQueue,
     dirty_page_list: IndexQueue,
@@ -184,28 +181,28 @@ impl PageCacheInner {
         }
     }
 
-    fn lock_page_internal(&mut self, fpid: FilePageId, writable: bool) -> CachePageId {
+    fn lock_page_internal(&mut self, fpid: FilePageId, writable: bool) -> usize {
         assert!(!writable || self.transaction_active);
 
         let entry = self.page_map.get(&fpid);
         match entry {
-            Some(cpid) => {
+            Some(cache_slot) => {
                 // This page is already cached, return it.
-                let cpid = *cpid;
-                let cp = &mut self.pages[cpid.0];
+                let cache_slot = *cache_slot;
+                let cp = &mut self.pages[cache_slot];
                 if cp.ref_count == 0 {
                     // We maintain an invariant that pages are never in one of the
                     // lists unless they have a ref count of zero.
                     if cp.dirty {
-                        self.dirty_page_list.remove(cpid.0);
+                        self.dirty_page_list.remove(cache_slot);
                     } else {
-                        self.lru.remove(cpid.0);
+                        self.lru.remove(cache_slot);
                         cp.dirty = writable;
                     }
                 }
 
                 cp.ref_count += 1;
-                cpid
+                cache_slot
             },
             None => {
                 // This data is not resident, find an unused page and recycle it
@@ -218,7 +215,7 @@ impl PageCacheInner {
                             Some(fpid) => self.page_map.remove(&fpid),
                             None => None // this page has never been loaded, nothing to remove
                         };
-                        self.page_map.insert(fpid, CachePageId(index));
+                        self.page_map.insert(fpid, index);
                         cp.fpid = Some(fpid);
                         cp.ref_count = 1;
                         cp.dirty = writable;
@@ -227,7 +224,7 @@ impl PageCacheInner {
                         self.persistent_store.borrow_mut().read(fpid,
                             &mut *self.pages[index].data);
 
-                        CachePageId(index)
+                        index
                     }
 
                     None => panic!("cache full!")
@@ -236,15 +233,15 @@ impl PageCacheInner {
         }
     }
 
-    fn unlock_page(&mut self, cpid: CachePageId) {
-        let cp = &mut self.pages[cpid.0];
+    fn unlock_page(&mut self, cache_slot: usize) {
+        let cp = &mut self.pages[cache_slot];
         assert!(!cp.dirty || self.transaction_active);
         cp.ref_count -= 1;
         if cp.dirty {
-            self.dirty_page_list.push_head(cpid.0);
-        } else if self.pages[cpid.0].ref_count == 0 {
+            self.dirty_page_list.push_head(cache_slot);
+        } else if self.pages[cache_slot].ref_count == 0 {
             // Put back in LRU
-            self.lru.push_head(cpid.0);
+            self.lru.push_head(cache_slot);
         }
     }
 
