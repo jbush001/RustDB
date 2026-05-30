@@ -80,7 +80,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_read_write() {
+    fn test_write() {
         let file = NamedTempFile::new().unwrap();
         let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
@@ -92,12 +92,26 @@ mod tests {
 
         store.write(FilePageId(0), &temp1);
 
-        let mut temp2: PageData = [0; PAGE_SIZE];
-        store.read(FilePageId(0), &mut temp2);
-        assert_eq!(&temp2[..test_string1.len()], test_string1.as_bytes());
-
         let bytes = fs::read(file.path().to_str().unwrap()).unwrap();
         assert_eq!(bytes, temp1);
+    }
+
+    fn test_read() {
+        let file = NamedTempFile::new().unwrap();
+        let mut temp1: PageData = [0; PAGE_SIZE];
+        let test_string1 = "abcdefghiklmnopqrstuvwxyz0123456789";
+        for (dest, src) in temp1.iter_mut().zip(test_string1.bytes().cycle()) {
+            *dest = src;
+        }
+
+        fs::write(file.path().to_str().unwrap(), &temp1).expect("write failed");
+
+        let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
+
+        let mut temp2: PageData = [0; PAGE_SIZE];
+        store.read(FilePageId(0), &mut temp2);
+
+        assert_eq!(temp1, temp2);
     }
 
     #[test]
