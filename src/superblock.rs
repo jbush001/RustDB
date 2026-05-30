@@ -14,6 +14,10 @@
 //   limitations under the License.
 //
 
+// Block 0, the first block in the filesystem, has key information and
+// links out to other file system structures. As such, many other places
+// in the code access it.
+
 use bytemuck::{Pod, Zeroable};
 use crate::page_cache::*;
 use std::mem;

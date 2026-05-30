@@ -14,19 +14,18 @@
 //   limitations under the License.
 //
 
-
-//
-// the 0th page of the database file contains information
-// magic: u32
-// free_list_head: FilePageId   Page number of free list
-// file_size: FilePageId        File size in pages
-//
+// This is a simplistic implementation that is a bit of a placeholder. There
+// are two places to get pages: virgin pages can be carved off the end of the
+// file (the frontier) or any previously freed pages are stored in a on-disk
+// linked list structure.
 
 use crate::page_cache::*;
 use crate::util::*;
 use crate::superblock::*;
 
-const FREE_LIST_END: FilePageId = FilePageId(0); // Since page 0 is the superblock, can't be freed.
+// Since page 0 is the superblock, can't be freed, so this value
+// acts as a delimiter for the free page linked list.
+const FREE_LIST_END: FilePageId = FilePageId(0);
 
 pub struct PageAllocator {
     page_cache: PageCache,
@@ -49,7 +48,6 @@ impl PageAllocator {
         }
     }
 
-    // Returns a 64 bit page number
     pub fn alloc(&mut self) -> FilePageId {
         if self.free_list_head != FREE_LIST_END {
             let result = self.free_list_head;

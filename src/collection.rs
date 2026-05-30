@@ -14,6 +14,12 @@
 //   limitations under the License.
 //
 
+// A collection is a set of documents, which are assumed to be of the same
+// general schema and type. The documents themselves are stored inside a BTree,
+// indexed by a unique 64-bit identifier (the DocID). There are ancilary BTrees
+// for any indices fields within these documents to allow fast sorting and
+// searching.
+
 // TODO: collection metadata is not persisted.
 
 use serde_json::Value;
@@ -149,6 +155,7 @@ impl Collection {
         self.indices.push(index)
     }
 
+    // Walk through all documents in the collection, in order of DocID
     fn iterate(&mut self, page_cache: &PageCache) -> impl Iterator<Item = (DocID, Value)> {
         let doc_cursor = btree_iterate(self.document_btree_root, false, page_cache);
         doc_cursor.map(|(key, value)| {
@@ -214,6 +221,7 @@ impl std::fmt::Display for PathElement {
     }
 }
 
+// A path uniquely identifies some element within a document.
 #[derive(Debug, Clone)]
 struct FieldPath(Vec<PathElement>);
 
@@ -244,8 +252,7 @@ impl FieldPath {
     }
 }
 
-fn lookup_field(path: &FieldPath, record: &Value)
-    -> Result<Value, String> {
+fn lookup_field(path: &FieldPath, record: &Value) -> Result<Value, String> {
     let mut current_val = record;
     let root = PathElement::FieldName("".to_string()); // TODO: this incurs allocation costs, slow.
     let mut parent = &root;

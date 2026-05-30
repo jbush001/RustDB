@@ -38,6 +38,9 @@ pub fn set_u64(slice: &mut [u8], offs: usize, val: u64) {
     slice[offs..offs + 8].copy_from_slice(&val.to_le_bytes());
 }
 
+// This is a queue of array indices, which allow us to create LRUs
+// without requiring weird pointer owning semantics and intrusive
+// data structures.
 pub struct IndexQueue {
     next: Vec<Option<usize>>,
     prev: Vec<Option<usize>>,

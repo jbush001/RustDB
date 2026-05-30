@@ -14,6 +14,9 @@
 //   limitations under the License.
 //
 
+// This module mediates all disk access, keeping recently used pages
+// in memory to optimize I/O.
+
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -28,6 +31,8 @@ pub type PageData = [u8; PAGE_SIZE];
 #[derive(PartialEq, Ord, PartialOrd, Eq, Debug, Clone, Copy, Hash, Default)]
 pub struct FilePageId(pub u64);
 
+// This is the interface to the underlying storage, called by this module
+// to read and write pages.
 pub trait PersistentStore: Any {
     fn read(&mut self, fpid: FilePageId, page: &mut PageData);
     fn write(&mut self, fpid: FilePageId, page: &PageData);
@@ -36,16 +41,17 @@ pub trait PersistentStore: Any {
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
+// Metadata and underlying storage for cached data.
 #[derive(Debug, Clone)]
 struct CachedPage {
-    fpid: Option<FilePageId>,
+    fpid: Option<FilePageId>, // Which disk block this is from
     ref_count: u32,
-    dirty: bool,
+    dirty: bool, // This differs from what is on disk and need to be written.
     data: Box<PageData>
 }
 
 pub struct PageGuard {
-    cache_slot: usize,
+    cache_slot: usize, // Index into array of cached pages
     data: *const PageData,
     cache: Rc<RefCell<PageCacheInner>>,
 }
@@ -103,6 +109,8 @@ pub struct PageCache {
     inner: Rc<RefCell<PageCacheInner>>
 }
 
+// This acts as the wrapper for an inner object. The latter is shared between
+// multiple PageGuards, which allow RAII automatic release.
 impl PageCache {
     pub fn new(size: usize, persistent_store: Rc<RefCell<dyn PersistentStore>>) -> Self {
         PageCache {
@@ -121,6 +129,8 @@ impl PageCache {
         }
     }
 
+    // If a page is locked mutable, it will be written back when
+    // the transaction is complete.
     pub fn lock_page_mut(&self, fpid: FilePageId) -> PageGuardMut {
         let mut inner = self.inner.borrow_mut();
         let cache_slot = inner.lock_page_internal(fpid, true);
@@ -133,6 +143,7 @@ impl PageCache {
         }
     }
 
+    // A transaction must be active in order to write pages.
     pub fn begin_transaction(&self) -> TransactionGuard {
         let mut inner = self.inner.borrow_mut();
         inner.begin_transaction();
@@ -143,6 +154,7 @@ impl PageCache {
     }
 }
 
+// TBD, placeholder for two phase commit.
 struct Journal {
 }
 
