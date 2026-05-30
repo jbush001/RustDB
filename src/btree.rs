@@ -19,7 +19,7 @@
 use crate::util::*;
 use crate::page_cache::{PageCache, FilePageId, PageData, PAGE_SIZE};
 use crate::page_allocator::{PageAllocator};
-use crate::record_array;
+use crate::vararray::*;
 
 const HEADER_NEXT_SIB_OFFS: usize = 8;
 const HEADER_PREV_SIB_OFFS: usize = 16;
@@ -57,16 +57,16 @@ impl Iterator for BTreeCursor {
             let page = self.page_cache.lock_page(self.current_node_fpid);
 
             if self.reverse {
-                if record_array::get_num_entries(&page) > 0 && self.current_index != usize::MAX {
+                if get_num_vararray_entries(&page) > 0 && self.current_index != usize::MAX {
                     break page;
                 }
 
                 self.current_node_fpid = get_prev_sib(&page);
                 if self.current_node_fpid != INVALID_FPID {
                     let page = self.page_cache.lock_page(self.current_node_fpid);
-                    self.current_index = record_array::get_num_entries(&page) - 1;
+                    self.current_index = get_num_vararray_entries(&page) - 1;
                 }
-            } else if self.current_index >= record_array::get_num_entries(&page) {
+            } else if self.current_index >= get_num_vararray_entries(&page) {
                 self.current_node_fpid = get_next_sib(&page);
                 self.current_index = 0;
             } else {
@@ -106,7 +106,7 @@ pub fn btree_iterate(root_node_fpid: FilePageId, reverse: bool, page_cache: &Pag
         if is_leaf(&page) {
             return BTreeCursor {
                 current_node_fpid,
-                current_index: if reverse { record_array::get_num_entries(&page) - 1 } else { 0 },
+                current_index: if reverse { get_num_vararray_entries(&page) - 1 } else { 0 },
                 reverse,
                 page_cache: page_cache.clone()
             }
@@ -127,7 +127,7 @@ pub fn btree_find(root_node_fpid: FilePageId, key: &[u8], reverse: bool, page_ca
         let page = page_cache.lock_page(current_node_fpid);
         let index = find_key(&page, key);
         if is_leaf(&page) {
-            if (reverse && index == 0) || (!reverse && index == record_array::get_num_entries(&page)) {
+            if (reverse && index == 0) || (!reverse && index == get_num_vararray_entries(&page)) {
                 // Nothing to fetch, return dummy cursor
                 return BTreeCursor {
                     current_node_fpid: INVALID_FPID,
@@ -145,7 +145,7 @@ pub fn btree_find(root_node_fpid: FilePageId, key: &[u8], reverse: bool, page_ca
             }
         }
 
-        if index == record_array::get_num_entries(&page) {
+        if index == get_num_vararray_entries(&page) {
             current_node_fpid = get_right_child(&page);
         } else {
             current_node_fpid = FilePageId(u64::from_le_bytes(get_entry_value(&page, index)
@@ -165,11 +165,11 @@ fn find_with_path(root_node_fpid: FilePageId,
         let index = find_key(&page, key);
         path.push((current_node_fpid, index));
         if is_leaf(&page) {
-            break index < record_array::get_num_entries(&page)
+            break index < get_num_vararray_entries(&page)
                 && get_entry_key(&page, index) == key;
         }
 
-        if index == record_array::get_num_entries(&page) {
+        if index == get_num_vararray_entries(&page) {
             current_node_fpid = get_right_child(&page);
         } else {
             current_node_fpid = FilePageId(u64::from_le_bytes(get_entry_value(&page, index).try_into()
@@ -200,7 +200,7 @@ pub fn btree_insert(root_node_fpid: FilePageId,
     let mut insert_key = key.to_vec();
     for (node_fpid, _) in path.iter().rev() {
         let mut page = page_cache.lock_page_mut(*node_fpid);
-        if record_array::get_free_space(&page) >= get_entry_size(&insert_key, &insert_value) {
+        if get_vararray_free_space(&page) >= get_entry_size(&insert_key, &insert_value) {
             insert_entry(&mut page, insert_key.as_slice(), insert_value.as_slice());
             break;
         }
@@ -288,7 +288,7 @@ pub fn btree_delete(root_node_fpid: FilePageId,
 
     let (leaf_fpid, index) = path.iter().last().unwrap();
     let mut page = page_cache.lock_page_mut(*leaf_fpid);
-    record_array::delete_record(&mut page, *index);
+    delete_vararray_entry(&mut page, *index);
 
     // TODO: at this point we could walk back up the path freeing empty pages.
 }
@@ -303,12 +303,12 @@ fn print_btree(root_node_fpid: FilePageId, page_cache: &PageCache) {
             fpid.0, is_leaf(&page), get_prev_sib(&page).0, get_next_sib(&page).0, get_right_child(&page).0);
 
         if is_leaf(&page) {
-            for i in 0..record_array::get_num_entries(&page) {
+            for i in 0..get_num_vararray_entries(&page) {
                 println!("{}. {} value {}", i,
                     to_hex(get_entry_key(&page, i), 16), to_hex(get_entry_value(&page, i), 16));
             }
         } else {
-            for i in 0..record_array::get_num_entries(&page) {
+            for i in 0..get_num_vararray_entries(&page) {
                 let child_fpid = u64::from_le_bytes(get_entry_value(&page, i).try_into()
                     .expect("value was not 8 bytes"));
                 println!("{}. {} child page {}", i,
@@ -340,7 +340,7 @@ fn to_hex(bytes: &[u8], mut max_len: usize) -> String {
 
 // Create an empty node
 pub fn init_btree_node(page: &mut PageData) {
-    record_array::init_array(page);
+    init_vararray(page);
     page[0] = FLAG_LEAF;
 }
 
@@ -381,20 +381,20 @@ fn set_right_child(page: &mut PageData, fpid: FilePageId) {
 }
 
 fn get_entry_size(key: &[u8], value: &[u8]) -> usize {
-    // 2 bytes for the index table entry (in record_array)
-    // 2 bytes for the entry length (in record_array)
+    // 2 bytes for the index table entry (in vararray)
+    // 2 bytes for the entry length (in vararray)
     // 2 bytes for the key length
     key.len() + value.len() + 6
 }
 
 fn get_entry_key(page: &PageData, rec_num: usize) -> &[u8] {
-    let rec = record_array::get_record(page, rec_num);
+    let rec = get_vararray_entry(page, rec_num);
     let key_len = get_u16(rec, 0) as usize;
     &rec[2..2 + key_len]
 }
 
 fn get_entry_value(page: &PageData, rec_num: usize) -> &[u8] {
-    let rec = record_array::get_record(page, rec_num);
+    let rec = get_vararray_entry(page, rec_num);
     let key_len = get_u16(rec, 0) as usize;
     &rec[2 + key_len..]
 }
@@ -411,7 +411,7 @@ fn get_entry_value(page: &PageData, rec_num: usize) -> &[u8] {
 //
 fn find_key(page: &PageData, key: &[u8]) -> usize {
     let mut low = 0;
-    let mut high = record_array::get_num_entries(page);
+    let mut high = get_num_vararray_entries(page);
     while low < high {
         let mid = (low + high) / 2;
         let mid_key = get_entry_key(page, mid);
@@ -428,14 +428,14 @@ fn find_key(page: &PageData, key: &[u8]) -> usize {
 // Insert a entry into a single page.
 fn insert_entry(page: &mut PageData, key: &[u8], value: &[u8]) {
     let index = find_key(page, key);
-    assert!(index == record_array::get_num_entries(page) || get_entry_key(page, index) != key,
+    assert!(index == get_num_vararray_entries(page) || get_entry_key(page, index) != key,
         "Duplicate key inserted");
 
     let mut entry = Vec::with_capacity(key.len() + value.len() + 2);
     entry.extend_from_slice(&(key.len() as u16).to_le_bytes());
     entry.extend_from_slice(key);
     entry.extend_from_slice(value);
-    record_array::insert_record(page, index, &entry);
+    insert_vararray_entry(page, index, &entry);
 }
 
 // Helper function to add entry to next available slot. This assumes the entry is
@@ -446,7 +446,7 @@ fn append_entry(page: &mut PageData, key: &[u8], value: &[u8]) -> usize {
     entry.extend_from_slice(&(key.len() as u16).to_le_bytes());
     entry.extend_from_slice(key);
     entry.extend_from_slice(value);
-    record_array::insert_record(page, record_array::get_num_entries(page), &entry);
+    insert_vararray_entry(page, get_num_vararray_entries(page), &entry);
 
     get_entry_size(key, value)
 }
@@ -461,7 +461,7 @@ fn split_node(orig: &PageData, out1: &mut PageData, out2: &mut PageData) -> Vec<
 
     // Copy out entries from the orig into out1 until we have just over half.
     // then continue copying into out2.
-    let orig_entries = record_array::get_num_entries(orig);
+    let orig_entries = get_num_vararray_entries(orig);
 
     let mut orig_index = 0;
     let mut bytes_copied = 0;
@@ -520,7 +520,7 @@ mod tests {
     fn sanity_check_node(page: &PageData) {
         // Ensure the keys are in order
         let mut last_key: &[u8] = &[0];
-        for i in 0..record_array::get_num_entries(page) {
+        for i in 0..get_num_vararray_entries(page) {
             let this_key = get_entry_key(page, i);
             assert_le!(last_key, this_key, "keys are out of order");
             last_key = this_key;
@@ -535,7 +535,7 @@ mod tests {
         append_entry(&mut page, "foobar".as_bytes(), "abcdefghijklmnopqrstuwxyz".as_bytes());
         append_entry(&mut page, "zzzz".as_bytes(), "3.1415926535897932384626433832".as_bytes());
         sanity_check_node(&page);
-        assert_eq!(record_array::get_num_entries(&page), 2);
+        assert_eq!(get_num_vararray_entries(&page), 2);
 
         assert_eq!(get_entry_key(&page, 0), "foobar".as_bytes());
         assert_eq!(get_entry_value(&page, 0), "abcdefghijklmnopqrstuwxyz".as_bytes());
@@ -554,7 +554,7 @@ mod tests {
         append_entry(&mut page, "cccc".as_bytes(), &[0u8]);
         append_entry(&mut page, "dddd".as_bytes(), &[0u8]);
         sanity_check_node(&page);
-        assert_eq!(record_array::get_num_entries(&page), 4);
+        assert_eq!(get_num_vararray_entries(&page), 4);
 
         assert_eq!(find_key(&page, "aaa".as_bytes()), 0); // Search key is before first key
         assert_eq!(find_key(&page, "aaaa".as_bytes()), 0); // Equal to first key
@@ -572,26 +572,26 @@ mod tests {
         assert_eq!(find_key(&page, "foo".as_bytes()), 0);
     }
 
-    // Validates record_array::get_free_space and get_entry_size return
+    // Validates get_vararray_free_space and get_entry_size return
     // consistent values.
     #[test]
     fn test_entry_size() {
         let mut page: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut page);
-        let init_free_space = record_array::get_free_space(&page);
+        let init_free_space = get_vararray_free_space(&page);
         let key1 = "foo".as_bytes();
         let val1 = "00000000000000000000000000000".as_bytes();
         insert_entry(&mut page, key1, &val1);
-        assert_lt!(record_array::get_free_space(&page), init_free_space);
-        assert_eq!(record_array::get_free_space(&page), init_free_space -
+        assert_lt!(get_vararray_free_space(&page), init_free_space);
+        assert_eq!(get_vararray_free_space(&page), init_free_space -
             get_entry_size(key1, &val1));
 
         let key2 = "abcdefghijklmnopqrstuvwxyz".as_bytes();
         let val2 = "..ooOOO".as_bytes();
-        let init_free_space = record_array::get_free_space(&page);
+        let init_free_space = get_vararray_free_space(&page);
         insert_entry(&mut page, key2, &val2);
-        assert_lt!(record_array::get_free_space(&page), init_free_space);
-        assert_eq!(record_array::get_free_space(&page), init_free_space -
+        assert_lt!(get_vararray_free_space(&page), init_free_space);
+        assert_eq!(get_vararray_free_space(&page), init_free_space -
             get_entry_size(key2, &val2));
     }
 
@@ -606,7 +606,7 @@ mod tests {
         insert_entry(&mut page, "apple".as_bytes(), &[0u8]);
         insert_entry(&mut page, "banana".as_bytes(), &[0u8]);
         sanity_check_node(&page);
-        assert_eq!(record_array::get_num_entries(&page), 4);
+        assert_eq!(get_num_vararray_entries(&page), 4);
 
         assert_eq!(find_key(&page, "aardvark".as_bytes()), 0);
         assert_eq!(find_key(&page, "apple".as_bytes()), 1);
@@ -654,7 +654,7 @@ mod tests {
         sanity_check_node(&node2);
         sanity_check_node(&node3);
 
-        let orig_sep_index = record_array::get_num_entries(&node2);
+        let orig_sep_index = get_num_vararray_entries(&node2);
         assert_eq!(&separator_key, &get_entry_key(&node1, orig_sep_index));
 
         assert_eq!(get_right_child(&node2), FilePageId(u64::from_le_bytes(
@@ -663,11 +663,11 @@ mod tests {
         assert_eq!(get_right_child(&node3), get_right_child(&node1));
 
         // Ensure all entries are present and in order
-        let node2_recs = record_array::get_num_entries(&node2);
-        assert_eq!(record_array::get_num_entries(&node1) - 1,
-            node2_recs + record_array::get_num_entries(&node3));
+        let node2_recs = get_num_vararray_entries(&node2);
+        assert_eq!(get_num_vararray_entries(&node1) - 1,
+            node2_recs + get_num_vararray_entries(&node3));
         assert_lt!(node2_recs, PAGE1_ENTRIES * 2 / 3);
-        for i in 0..record_array::get_num_entries(&node1) {
+        for i in 0..get_num_vararray_entries(&node1) {
             if i == node2_recs {
                 continue; // ignore splitter
             }
@@ -701,15 +701,15 @@ mod tests {
         sanity_check_node(&node2);
         sanity_check_node(&node3);
 
-        let orig_sep_index = record_array::get_num_entries(&node2) - 1;
+        let orig_sep_index = get_num_vararray_entries(&node2) - 1;
         assert_eq!(&separator_key, &get_entry_key(&node1, orig_sep_index));
 
         // Ensure all entries are present and in order
-        let node2_recs = record_array::get_num_entries(&node2);
-        assert_eq!(record_array::get_num_entries(&node1),
-            node2_recs + record_array::get_num_entries(&node3));
+        let node2_recs = get_num_vararray_entries(&node2);
+        assert_eq!(get_num_vararray_entries(&node1),
+            node2_recs + get_num_vararray_entries(&node3));
         assert_lt!(node2_recs, PAGE1_ENTRIES * 2 / 3);
-        for i in 0..record_array::get_num_entries(&node1) {
+        for i in 0..get_num_vararray_entries(&node1) {
             let orig_entry = get_entry_key(&node1, i);
             if i >= node2_recs {
                 assert_eq!(orig_entry, get_entry_key(&node3, i - node2_recs));
@@ -733,8 +733,8 @@ mod tests {
 
         split_node(&node1, &mut node2, &mut node3);
 
-        assert_eq!(record_array::get_num_entries(&node2), 1);
-        assert_eq!(record_array::get_num_entries(&node3), 1);
+        assert_eq!(get_num_vararray_entries(&node2), 1);
+        assert_eq!(get_num_vararray_entries(&node3), 1);
         sanity_check_node(&node2);
         sanity_check_node(&node3);
     }

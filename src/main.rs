@@ -19,7 +19,7 @@ mod page_cache;
 mod util;
 mod page_allocator;
 mod file_store;
-mod record_array;
+mod vararray;
 mod mocks;
 mod collection;
 mod superblock;
