@@ -123,4 +123,37 @@ mod tests {
         let p4 = allocator.alloc();
         assert_gt!(p4.0, p1.0);
     }
+
+    #[test]
+    fn test_page_allocator_persistence() {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
+        let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
+        let _transaction = page_cache.begin_transaction();
+
+        {
+            let mut page = page_cache.lock_page_mut(SUPERBLOCK_FPID);
+            init_superblock(&mut page);
+        }
+
+        let mut allocator = PageAllocator::new(&mut page_cache);
+
+        // Allocate two frontier blocks, free one
+        let p0 = allocator.alloc();
+        let p1 = allocator.alloc();
+        allocator.free(p1);
+
+        // Create a new allocator to read the state back from the superblock
+        let mut allocator2 = PageAllocator::new(&mut page_cache);
+
+        // Alloc after free should return the same block
+        let p3 = allocator2.alloc();
+        assert_eq!(p3, p1);
+        assert_ne!(p3, p0);
+
+        // Should come from the frontier
+        let p4 = allocator2.alloc();
+        assert_gt!(p4, p1);
+        assert_ne!(p4, p0);
+        assert_ne!(p4, p3);
+    }
 }
