@@ -96,6 +96,7 @@ mod tests {
         assert_eq!(bytes, temp1);
     }
 
+    #[test]
     fn test_read() {
         let file = NamedTempFile::new().unwrap();
         let mut temp1: PageData = [0; PAGE_SIZE];
