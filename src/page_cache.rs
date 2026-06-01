@@ -24,7 +24,7 @@ use std::any::Any;
 use std::ops::{Deref, DerefMut};
 use crate::util::*;
 
-pub const PAGE_SIZE: usize = 0x1000;
+pub const PAGE_SIZE: usize = 0x2000;
 pub type PageData = [u8; PAGE_SIZE];
 
 // This is the index into the file in page size increments.

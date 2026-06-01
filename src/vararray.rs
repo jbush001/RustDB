@@ -145,14 +145,14 @@ mod tests {
         let data_start_offs = get_u16(page, DATA_START_FIELD_OFFS) as usize;
         if num_entries == 0 {
             // Ensure first offs in header is correct
-            assert_eq!(page.len(), data_start_offs, "First offset field is incorrect");
+            assert_eq!(PAGE_SIZE, data_start_offs, "First offset field is incorrect");
             return;
         }
 
         for i in 0..num_entries {
             let entry_offs = get_u16(page, OFFSETS_LOC + i * OFFSETS_ENTRY_SIZE) as usize;
             let entry_len = get_u16(page, OFFSETS_LOC + i * OFFSETS_ENTRY_SIZE + 2) as usize;
-            assert_lt!(entry_offs, page.len(), "Record offset out of range");
+            assert_lt!(entry_offs, PAGE_SIZE, "Record offset out of range");
             sorted_rec_offs.push((entry_offs, entry_len));
         }
 
@@ -170,10 +170,10 @@ mod tests {
         for (entry_start, entry_len) in sorted_rec_offs {
             assert_eq!(entry_start, last_entry_end, "Entries are not packed"); // ensure non-overlapping
             last_entry_end = entry_start + entry_len;
-            assert_le!(last_entry_end, page.len(), "Entry length out of bounds"); // Ensure it doesn't spill off page
+            assert_le!(last_entry_end, PAGE_SIZE, "Entry length out of bounds"); // Ensure it doesn't spill off page
         }
 
-        assert_eq!(last_entry_end, page.len(), "Gap at end of records");
+        assert_eq!(last_entry_end, PAGE_SIZE, "Gap at end of records");
     }
 
     // Validate the sanity_check routine
@@ -197,7 +197,7 @@ mod tests {
 
         insert_vararray_entry(&mut page, 0, "aaaaa".as_bytes());
         insert_vararray_entry(&mut page, 1, "bbbbb".as_bytes());
-        page[OFFSETS_LOC + 5] = 17; // Set the high byte of the offset past the page
+        set_u16(&mut page, OFFSETS_LOC + OFFSETS_ENTRY_SIZE, PAGE_SIZE as u16 + 1);
 
         sanity_check_record_array(&page);
     }
