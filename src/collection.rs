@@ -89,18 +89,6 @@ impl Collection {
         // reindex them.
     }
 
-    // Walk through all documents in the collection, in order of DocID
-    // TODO deprecate, use sequential scan
-    fn iterate(&mut self, page_cache: &PageCache) -> impl Iterator<Item = (DocID, Value)> {
-        let doc_cursor = btree_iterate(self.document_btree_root, false, page_cache);
-        doc_cursor.map(|(key, value)| {
-            let docid = DocID(u64::from_be_bytes(key.try_into().unwrap()));
-            let doc = serde_json::from_slice(&value).expect("Failed to parse JSON");
-
-            (docid, doc)
-        })
-    }
-
     pub fn get_document(&self, docid: DocID, page_cache: &PageCache) -> Option<Value> {
         let docid_key = &docid.0.to_be_bytes();
         let mut cursor = btree_find(self.document_btree_root, docid_key, false, page_cache);
@@ -500,8 +488,9 @@ mod tests {
         }
 
         let mut i = 0;
-        for (key, value) in collection.iterate(&page_cache) {
-            assert_eq!(docids[i], key);
+        let iter = SequentialScan::new(&collection, &page_cache);
+        for (docid, value) in iter {
+            assert_eq!(docids[i], docid);
             assert_eq!(create_document(i), value);
             i += 1;
         }
