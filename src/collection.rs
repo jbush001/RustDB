@@ -32,7 +32,7 @@ use std::cell::RefCell;
 
 // Unique identifier (within a collection) for a specific document.
 #[derive(PartialEq, Eq, Ord, PartialOrd, Debug, Clone, Copy, Hash)]
-pub struct DocID(u64);
+pub struct DocID(pub u64);
 
 struct Index {
     field: FieldPath,
@@ -168,7 +168,7 @@ impl Collection {
 //
 // Note: this encoding is one-way and not intended to be decoded.
 //
-fn encode_key(key: &Value, docid: DocID) -> Result<Vec<u8>, String> {
+pub fn encode_key(key: &Value, docid: DocID) -> Result<Vec<u8>, String> {
     // Prepend a tag in the event key types are mixed in an index.
     const TAG_BOOL: u8 = 1;
     const TAG_INT: u8 = 2;
@@ -224,11 +224,6 @@ fn encode_key(key: &Value, docid: DocID) -> Result<Vec<u8>, String> {
 
     Ok(encoded)
 }
-
-// This is inspired by Volcano: Graefe, Goetz.
-// "Volcano/spl minus/an extensible and parallel query evaluation system."
-// IEEE Transactions on Knowledge and Data Engineering 6.1 (2002): 120-135.
-pub trait SearchTreeNode: Iterator<Item = (DocID, Value)> {}
 
 pub struct SequentialScan {
     iterator: BTreeCursor
@@ -386,7 +381,7 @@ impl FieldPath {
     }
 }
 
-fn lookup_field(path: &FieldPath, record: &Value) -> Result<Value, String> {
+pub fn lookup_field(path: &FieldPath, record: &Value) -> Result<Value, String> {
     let mut current_val = record;
     let root = PathElement::FieldName("".to_string()); // TODO: this incurs allocation costs, slow.
     let mut parent = &root;
