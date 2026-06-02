@@ -89,8 +89,8 @@ impl ExpressionNode {
                 // Comparisons must obey the same ordering as the btree encoding, so we
                 // encoded them the same with a dummmy docid. This means we will not
                 // coerce values for comparison.
-                let encoded_left = encode_key(&left.eval(document)?, DocID(0))?;
-                let encoded_right = encode_key(&right.eval(document)?, DocID(0))?;
+                let encoded_left = encode_key(&left.eval(document)?, DocId(0))?;
+                let encoded_right = encode_key(&right.eval(document)?, DocId(0))?;
                 match operation {
                     Operation::Gt => Ok(Value::Bool(encoded_left > encoded_right)),
                     Operation::Gte => Ok(Value::Bool(encoded_left >= encoded_right)),
@@ -113,12 +113,12 @@ impl ExpressionNode {
 }
 
 struct ExpressionFilter {
-    source: Box<dyn Iterator<Item = (DocID, Value)>>,
+    source: Box<dyn Iterator<Item = (DocId, Value)>>,
     expression: Box<ExpressionNode>
 }
 
 impl Iterator for ExpressionFilter {
-    type Item = (DocID, Value);
+    type Item = (DocId, Value);
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -137,12 +137,12 @@ mod tests {
     use super::*;
 
     struct MockSource {
-        documents: Vec<(DocID, Value)>,
+        documents: Vec<(DocId, Value)>,
         index: usize
     }
 
     impl Iterator for MockSource {
-        type Item = (DocID, Value);
+        type Item = (DocId, Value);
 
         fn next(&mut self) -> Option<Self::Item> {
             if self.index >= self.documents.len() {
@@ -170,7 +170,7 @@ mod tests {
         ];
 
         let source = MockSource {
-            documents: (1..).into_iter().zip(documents).map(|(docid, doc)| (DocID(docid), doc)).collect(),
+            documents: (1..).into_iter().zip(documents).map(|(docid, doc)| (DocId(docid), doc)).collect(),
             index: 0
         };
         let filter = ExpressionFilter {
@@ -198,7 +198,7 @@ mod tests {
             )))
         };
 
-        let results: Vec<(DocID, Value)> = filter.collect();
+        let results: Vec<(DocId, Value)> = filter.collect();
         assert_eq!(results.len(), 5);
         assert_eq!(results[0].1, json!({"foo": 3, "bar": 101}));
         assert_eq!(results[1].1, json!({"foo": 4, "bar": 102}));
