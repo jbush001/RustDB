@@ -25,7 +25,7 @@ const HEADER_NEXT_SIB_OFFS: usize = 8;
 const HEADER_PREV_SIB_OFFS: usize = 16;
 const HEADER_RIGHT_CHILD_OFFS: usize = 24;
 
-const MAX_RECORD_SIZE: usize = (PAGE_SIZE - 32) / 4 - 16; // I added a little padding for safey
+pub const MAX_RECORD_SIZE: usize = (PAGE_SIZE - 32) / 4 - 16; // I added a little padding for safey
 
 // Each entry is:
 // key_length: u16

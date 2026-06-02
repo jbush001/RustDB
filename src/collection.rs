@@ -29,6 +29,9 @@ use crate::page_allocator::*;
 use regex::Regex;
 use std::rc::Rc;
 use std::cell::RefCell;
+use crate::util::*;
+
+const FLAG_OVERFLOW: u8 = 0x80;
 
 // Unique identifier (within a collection) for a specific document.
 #[derive(PartialEq, Eq, Ord, PartialOrd, Debug, Clone, Copy, Hash)]
@@ -53,12 +56,46 @@ impl Collection {
 
         let docid = self.next_docid;
         self.next_docid += 1;
-        let content = document.to_string().into_bytes();
-        btree_insert(self.document_btree_root,
-            &docid.to_be_bytes(), // Note: docid is stored bigendian so its in order.
-            &content,
-            page_cache,
-            page_allocator);
+        let mut content = Vec::with_capacity(1024);
+        content.push(0); // flag byte
+        serde_json::to_writer(&mut content, &document).expect("serialization failed");
+        if content.len() > MAX_RECORD_SIZE {
+            // need to create overflow records
+
+            // This goes inline into the page
+            let mut pointer: [u8; 17] = [0; 17];
+            pointer[0] = FLAG_OVERFLOW;
+            set_u64(&mut pointer, 1, content.len() as u64 - 1);
+
+            let mut offset = 1; // Skip the flag byte we speculatively added
+            let mut fpid = page_allocator.alloc();
+            set_u64(&mut pointer, 9, fpid.0);
+            while offset < content.len() {
+                let mut page = page_cache.lock_page_mut(fpid);
+                let to_copy = std::cmp::min(content.len() - offset, PAGE_SIZE - 8);
+                page[8..8 + to_copy].copy_from_slice(&content[offset..offset + to_copy]);
+                fpid = if offset + to_copy < content.len() {
+                    page_allocator.alloc()
+                } else {
+                    FilePageId(0)
+                };
+
+                set_u64(&mut page[..], 0, fpid.0);
+                offset += to_copy;
+            }
+
+            btree_insert(self.document_btree_root,
+                &docid.to_be_bytes(), // Note: docid is stored bigendian so its in order.
+                &pointer,
+                page_cache,
+                page_allocator);
+        } else {
+            btree_insert(self.document_btree_root,
+                &docid.to_be_bytes(), // Note: docid is stored bigendian so its in order.
+                &content,
+                page_cache,
+                page_allocator);
+        }
 
         // Update indices
         for index in &self.indices {
@@ -100,7 +137,7 @@ impl Collection {
             return None;
         }
 
-        Some(serde_json::from_slice(&document_bytes).expect("Failed to parse JSON"))
+        get_document_body(&document_bytes, page_cache)
     }
 
     // TODO decide how to handle missing document. Should it be an error, or is it
@@ -110,23 +147,33 @@ impl Collection {
         let mut cursor = btree_find(self.document_btree_root, docid_key, false, page_cache);
         let entry = cursor.next();
         if entry.is_none() {
-            // Not present, case 1
             return;
         }
 
         let (got_docid, document_bytes) = entry.unwrap();
         if got_docid != docid_key {
-            // not present, case 2
             return;
+        }
+
+        let document = get_document_body(&document_bytes, page_cache)
+            .expect("Failed to read document body");
+
+        // Free overflow pages if present
+        if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
+            let mut current_fpid = FilePageId(get_u64(&document_bytes, 9));
+            while current_fpid != FilePageId(0) {
+                let page = page_cache.lock_page(current_fpid);
+                let next_page = FilePageId(get_u64(&page[..], 0));
+                drop(page);
+                page_allocator.free(current_fpid);
+                current_fpid = next_page;
+            }
         }
 
         btree_delete(self.document_btree_root,
             docid_key,
             page_cache,
             page_allocator);
-
-        let document: serde_json::Value =
-            serde_json::from_slice(&document_bytes).expect("Failed to parse JSON");
 
         // Remove from indices
         for index in &self.indices {
@@ -139,6 +186,33 @@ impl Collection {
                 }
             }
         }
+    }
+}
+
+fn get_document_body(document_bytes: &[u8], page_cache: &PageCache) -> Option<Value> {
+    if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
+        // This is using overflow pages
+        let mut length = get_u64(document_bytes, 1) as usize;
+        let mut current_fpid = FilePageId(get_u64(document_bytes, 9));
+
+        let mut content = Vec::with_capacity(length);
+        while length > 0 {
+            if current_fpid == FilePageId(0) {
+                println!("Error: record truncated");
+                break;
+            }
+
+            let page = page_cache.lock_page(current_fpid);
+            current_fpid = FilePageId(get_u64(&page[..], 0));
+            let to_copy = std::cmp::min(length, PAGE_SIZE - 8);
+            content.extend_from_slice(&page[8..8 + to_copy]);
+            length -= to_copy;
+        }
+
+        Some(serde_json::from_slice(&content).expect("Failed to parse JSON"))
+    } else {
+        // Stored inline
+        Some(serde_json::from_slice(&document_bytes[1..]).expect("Failed to parse JSON"))
     }
 }
 
@@ -214,14 +288,16 @@ pub fn encode_key(key: &Value, docid: DocID) -> Result<Vec<u8>, String> {
 }
 
 pub struct SequentialScan {
-    iterator: BTreeCursor
+    iterator: BTreeCursor,
+    page_cache: PageCache
 }
 
 impl SequentialScan {
     fn new(collection: &Collection, page_cache: &PageCache) -> Self {
         Self {
             iterator: btree_iterate(collection.document_btree_root,
-                false, page_cache)
+                false, page_cache),
+            page_cache: page_cache.clone()
         }
     }
 }
@@ -232,7 +308,7 @@ impl Iterator for SequentialScan {
     fn next(&mut self) -> Option<Self::Item> {
         if let Some((docid_bytes, value_bytes)) = self.iterator.next() {
             let docid = DocID(u64::from_be_bytes(docid_bytes.try_into().unwrap()));
-            let doc = serde_json::from_slice(&value_bytes).expect("Failed to parse JSON");
+            let doc = get_document_body(&value_bytes, &self.page_cache)?;
             Some((docid, doc))
         } else {
             None
@@ -955,5 +1031,30 @@ mod tests {
         let Some((key2, _)) = cursor.next() else { panic!("iterator did not return value") };
         assert_eq!(key2, docid2.0.to_be_bytes());
         assert_eq!(cursor.next(), None);
+    }
+
+    #[test]
+    fn test_overflow() {
+        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let _transaction = page_cache.begin_transaction();
+
+        // Create a large document
+        let large_value = "x".repeat(0x4000);
+        let doc = json!({"foo": large_value});
+        let docid = collection.insert_document(&doc, &mut page_cache, &mut allocator);
+
+        // Ensure we can read it back correctly
+        let mut iter = SequentialScan::new(&collection, &page_cache);
+        let Some((got_docid, got_doc)) = iter.next() else { panic!("couldn't get record"); };
+
+        assert_eq!(docid, got_docid);
+        assert_eq!(got_doc["foo"].as_str().unwrap(), large_value);
+
+        // Delete the document, ensure pages are freed
+        collection.delete(docid, &mut page_cache, &mut allocator);
+
+        let mut iter = SequentialScan::new(&collection, &page_cache);
+        assert!(iter.next().is_none());
+
     }
 }
