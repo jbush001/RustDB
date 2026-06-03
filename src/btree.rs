@@ -18,7 +18,7 @@
 
 use crate::util::*;
 use crate::page_cache::{PageCache, FilePageId, PageData, PAGE_SIZE};
-use crate::page_allocator::{PageAllocator};
+use crate::page_allocator::{PageAllocator, NULL_FPID};
 use crate::vararray::*;
 
 const HEADER_NEXT_SIB_OFFS: usize = 8;
@@ -35,8 +35,6 @@ pub const MAX_RECORD_SIZE: usize = (PAGE_SIZE - 32) / 4 - 16; // I added a littl
 
 const FLAG_LEAF: u8 = 1;
 
-const INVALID_FPID: FilePageId = FilePageId(0);
-
 pub struct BTreeCursor {
     current_node_fpid: FilePageId,
     current_index: usize,
@@ -50,7 +48,7 @@ impl Iterator for BTreeCursor {
     fn next(&mut self) -> Option<Self::Item> {
         // Check if we need to go to the next page or skip empty pages.
         let page = loop {
-            if self.current_node_fpid == INVALID_FPID {
+            if self.current_node_fpid == NULL_FPID {
                 return None
             }
 
@@ -62,7 +60,7 @@ impl Iterator for BTreeCursor {
                 }
 
                 self.current_node_fpid = get_prev_sib(&page);
-                if self.current_node_fpid != INVALID_FPID {
+                if self.current_node_fpid != NULL_FPID {
                     let page = self.page_cache.lock_page(self.current_node_fpid);
                     self.current_index = get_num_vararray_entries(&page) - 1;
                 }
@@ -132,7 +130,7 @@ impl BTree {
                 if (reverse && index == 0) || (!reverse && index == get_num_vararray_entries(&page)) {
                     // Nothing to fetch, return dummy cursor
                     return BTreeCursor {
-                        current_node_fpid: INVALID_FPID,
+                        current_node_fpid: NULL_FPID,
                         current_index: 0,
                         reverse,
                         page_cache: page_cache.clone()
@@ -178,7 +176,7 @@ impl BTree {
                     .expect("value was not 8 bytes")));
             }
 
-            assert!(current_node_fpid != INVALID_FPID,
+            assert!(current_node_fpid != NULL_FPID,
                 "Interior node has non-leaf children");
         };
 
@@ -314,7 +312,7 @@ impl BTree {
                     fifo.push(FilePageId(child_fpid));
                 }
 
-                if get_right_child(&page) != INVALID_FPID {
+                if get_right_child(&page) != NULL_FPID {
                     fifo.push(get_right_child(&page));
                 }
             }

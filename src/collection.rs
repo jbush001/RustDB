@@ -77,7 +77,7 @@ impl Collection {
                 fpid = if offset + to_copy < content.len() {
                     page_allocator.alloc()
                 } else {
-                    FilePageId(0)
+                    NULL_FPID
                 };
 
                 set_u64(&mut page[..], 0, fpid.0);
@@ -153,7 +153,7 @@ impl Collection {
         // Free overflow pages if present
         if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
             let mut current_fpid = FilePageId(get_u64(&document_bytes, 9));
-            while current_fpid != FilePageId(0) {
+            while current_fpid != NULL_FPID {
                 let page = page_cache.lock_page(current_fpid);
                 let next_page = FilePageId(get_u64(&page[..], 0));
                 drop(page);
@@ -183,7 +183,7 @@ fn get_document_body(document_bytes: &[u8], page_cache: &PageCache) -> Option<Va
 
         let mut content = Vec::with_capacity(length);
         while length > 0 {
-            if current_fpid == FilePageId(0) {
+            if current_fpid == NULL_FPID {
                 println!("Error: record truncated");
                 break;
             }

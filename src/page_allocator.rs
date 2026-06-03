@@ -23,9 +23,7 @@ use crate::page_cache::*;
 use crate::util::*;
 use crate::superblock::*;
 
-// Since page 0 is the superblock, can't be freed, so this value
-// acts as a delimiter for the free page linked list.
-const FREE_LIST_END: FilePageId = FilePageId(0);
+pub const NULL_FPID: FilePageId = FilePageId(0);
 
 pub struct PageAllocator {
     page_cache: PageCache,
@@ -49,7 +47,7 @@ impl PageAllocator {
     }
 
     pub fn alloc(&mut self) -> FilePageId {
-        if self.free_list_head != FREE_LIST_END {
+        if self.free_list_head != NULL_FPID {
             let result = self.free_list_head;
             {
                 let page = self.page_cache.lock_page(self.free_list_head);
