@@ -88,19 +88,23 @@ impl Iterator for BTreeCursor {
     }
 }
 
-pub struct BTree(FilePageId);
+pub struct BTree {
+    root: FilePageId
+}
 
 impl BTree {
-    pub fn new(page_cache: &PageCache, page_allocator: &mut PageAllocator) -> Self {
-        let btree_root = page_allocator.alloc();
-        let mut page = page_cache.lock_page_mut(btree_root);
+    pub fn create(page_cache: &PageCache, page_allocator: &mut PageAllocator) -> Self {
+        let root = page_allocator.alloc();
+        let mut page = page_cache.lock_page_mut(root);
         init_btree_node(&mut page);
 
-        BTree(btree_root)
+        BTree { root }
     }
 
+    // TODO: create a btree given an existing root page
+
     pub fn iterate(&self, reverse: bool, page_cache: &PageCache) -> BTreeCursor {
-        let mut current_node_fpid = self.0;
+        let mut current_node_fpid = self.root;
         loop {
             let page = page_cache.lock_page(current_node_fpid);
             if is_leaf(&page) {
@@ -122,7 +126,7 @@ impl BTree {
     }
 
     pub fn find(&self, key: &[u8], reverse: bool, page_cache: &PageCache) -> BTreeCursor {
-        let mut current_node_fpid = self.0;
+        let mut current_node_fpid = self.root;
         loop {
             let page = page_cache.lock_page(current_node_fpid);
             let index = find_key(&page, key);
@@ -157,7 +161,7 @@ impl BTree {
     fn find_with_path(&self,
         key: &[u8],
         page_cache: &PageCache) -> (Vec<(FilePageId, usize)>, bool) {
-        let mut current_node_fpid = self.0;
+        let mut current_node_fpid = self.root;
         let mut path: Vec<(FilePageId, usize)> = Vec::new();
 
         let found = loop {
@@ -206,7 +210,7 @@ impl BTree {
             }
 
             // Need to split...
-            if *node_fpid == self.0 {
+            if *node_fpid == self.root {
                 // Root node splits are special
                 let new_page_fpid1 = page_allocator.alloc();
                 let new_page_fpid2 = page_allocator.alloc();
@@ -291,7 +295,7 @@ impl BTree {
 
     fn print(&self, page_cache: &PageCache) {
         let mut fifo: Vec<FilePageId> = Vec::new();
-        fifo.push(self.0);
+        fifo.push(self.root);
         while !fifo.is_empty() {
             let fpid = fifo.remove(0);
             let page = page_cache.lock_page(fpid);
@@ -301,14 +305,15 @@ impl BTree {
             if is_leaf(&page) {
                 for i in 0..get_num_vararray_entries(&page) {
                     println!("{}. {} value {}", i,
-                        to_hex(get_entry_key(&page, i), 16), to_hex(get_entry_value(&page, i), 16));
+                        to_hex_string(get_entry_key(&page, i), 16),
+                        to_hex_string(get_entry_value(&page, i), 16));
                 }
             } else {
                 for i in 0..get_num_vararray_entries(&page) {
                     let child_fpid = u64::from_le_bytes(get_entry_value(&page, i).try_into()
                         .expect("value was not 8 bytes"));
                     println!("{}. {} child page {}", i,
-                        to_hex(get_entry_key(&page, i), 16), child_fpid);
+                        to_hex_string(get_entry_key(&page, i), 16), child_fpid);
                     fifo.push(FilePageId(child_fpid));
                 }
 
@@ -318,21 +323,6 @@ impl BTree {
             }
         }
     }
-}
-
-fn to_hex(bytes: &[u8], mut max_len: usize) -> String {
-    let mut result: String = "".to_string();
-    for x in bytes {
-        if max_len == 0 {
-            result += "...";
-            break;
-        }
-
-        max_len -= 1;
-        result += format!("{:02x}", x).as_str();
-    }
-
-    result
 }
 
 // Create an empty node
@@ -775,7 +765,7 @@ mod tests {
         }
 
         let mut allocator = PageAllocator::new(&mut page_cache);
-        let tree = BTree::new(&page_cache, &mut allocator);
+        let tree = BTree::create(&page_cache, &mut allocator);
 
         (page_cache, allocator, tree)
     }

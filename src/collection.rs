@@ -109,7 +109,7 @@ impl Collection {
         page_allocator: &mut PageAllocator) {
         let index = Index {
             field: path.clone(),
-            btree: BTree::new(page_cache, page_allocator)
+            btree: BTree::create(page_cache, page_allocator)
         };
 
         self.indices.push(index)
@@ -564,7 +564,7 @@ mod tests {
         }
 
         let mut allocator = PageAllocator::new(&mut page_cache);
-        let document_tree = BTree::new(&page_cache, &mut allocator);
+        let document_tree = BTree::create(&page_cache, &mut allocator);
         let collection = Collection {
             next_docid: 1,
             document_tree,
