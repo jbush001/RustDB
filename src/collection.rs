@@ -39,12 +39,12 @@ pub struct DocId(pub u64);
 
 struct Index {
     field: FieldPath,
-    btree_root: FilePageId
+    btree: BTree
 }
 
 pub struct Collection {
     next_docid: u64,
-    document_btree_root: FilePageId,
+    document_tree: BTree,
     indices: Vec<Index>
 }
 
@@ -84,24 +84,16 @@ impl Collection {
                 offset += to_copy;
             }
 
-            btree_insert(self.document_btree_root,
-                &docid.to_be_bytes(), // Note: docid is stored bigendian so its in order.
-                &pointer,
-                page_cache,
-                page_allocator);
+            self.document_tree.insert(&docid.to_be_bytes(), &pointer, page_cache, page_allocator);
         } else {
-            btree_insert(self.document_btree_root,
-                &docid.to_be_bytes(), // Note: docid is stored bigendian so its in order.
-                &content,
-                page_cache,
-                page_allocator);
+            self.document_tree.insert(&docid.to_be_bytes(), &content, page_cache, page_allocator);
         }
 
         // Update indices
-        for index in &self.indices {
+        for index in &mut self.indices {
             if let Ok(val) = lookup_field(&index.field, document) {
                 if let Ok(encoded) = encode_key(&val, DocId(docid)) {
-                    btree_insert(index.btree_root,
+                    index.btree.insert(
                         &encoded,
                         &docid.to_be_bytes(),
                         page_cache,
@@ -117,7 +109,7 @@ impl Collection {
         page_allocator: &mut PageAllocator) {
         let index = Index {
             field: path.clone(),
-            btree_root: btree_create(page_cache, page_allocator)
+            btree: BTree::new(page_cache, page_allocator)
         };
 
         self.indices.push(index)
@@ -128,7 +120,7 @@ impl Collection {
 
     pub fn get(&self, docid: DocId, page_cache: &PageCache) -> Option<Value> {
         let docid_key = &docid.0.to_be_bytes();
-        let mut cursor = btree_find(self.document_btree_root, docid_key, false, page_cache);
+        let mut cursor = self.document_tree.find(docid_key, false, page_cache);
         let entry = cursor.next();
         entry.as_ref()?; // Return if entry is None
 
@@ -144,7 +136,7 @@ impl Collection {
     // fine to ignore it?
     fn delete(&mut self, docid: DocId, page_cache: &PageCache, page_allocator: &mut PageAllocator) {
         let docid_key = &docid.0.to_be_bytes();
-        let mut cursor = btree_find(self.document_btree_root, docid_key, false, page_cache);
+        let mut cursor = self.document_tree.find(docid_key, false, page_cache);
         let entry = cursor.next();
         if entry.is_none() {
             return;
@@ -170,19 +162,13 @@ impl Collection {
             }
         }
 
-        btree_delete(self.document_btree_root,
-            docid_key,
-            page_cache,
-            page_allocator);
+        self.document_tree.delete(docid_key, page_cache, page_allocator);
 
         // Remove from indices
-        for index in &self.indices {
+        for index in &mut self.indices {
             if let Ok(val) = lookup_field(&index.field, &document) {
                 if let Ok(encoded) = encode_key(&val, docid) {
-                    btree_delete(index.btree_root,
-                        &encoded,
-                        page_cache,
-                        page_allocator);
+                    index.btree.delete(&encoded, page_cache, page_allocator);
                 }
             }
         }
@@ -295,8 +281,7 @@ pub struct SequentialScan {
 impl SequentialScan {
     fn new(collection: &Collection, page_cache: &PageCache) -> Self {
         Self {
-            iterator: btree_iterate(collection.document_btree_root,
-                false, page_cache),
+            iterator: collection.document_tree.iterate(false, page_cache),
             page_cache: page_cache.clone()
         }
     }
@@ -329,16 +314,13 @@ impl IndexScan {
     fn new(collection_ref: Rc<RefCell<Collection>>, field_index: usize,
         start_range: Option<Value>, end_range: Option<Value>, reverse: bool,
         page_cache: &PageCache) -> Result<Self, String> {
-        let collection = collection_ref.borrow();
+        let collection = collection_ref.borrow_mut();
 
         let iterator = if let Some(start_range) = start_range {
             let start_key = encode_key(&start_range, DocId(if reverse {u64::MAX} else {0}))?;
-            btree_find(collection.indices[field_index].btree_root,
-                &start_key,
-                reverse, page_cache)
+            collection.indices[field_index].btree.find(&start_key, reverse, page_cache)
         } else {
-            btree_iterate(collection.indices[field_index].btree_root,
-                false, page_cache)
+            collection.indices[field_index].btree.iterate(false, page_cache)
         };
 
         let end_key = if let Some(end_range) = end_range {
@@ -582,15 +564,10 @@ mod tests {
         }
 
         let mut allocator = PageAllocator::new(&mut page_cache);
-        let document_btree_root = allocator.alloc();
-        {
-            let mut page = page_cache.lock_page_mut(document_btree_root);
-            init_btree_node(&mut page);
-        }
-
+        let document_tree = BTree::new(&page_cache, &mut allocator);
         let collection = Collection {
             next_docid: 1,
-            document_btree_root,
+            document_tree,
             indices: Vec::new()
         };
 
@@ -774,7 +751,7 @@ mod tests {
         let doc2 = serde_json::from_str(r#"{"name": "Edward Jones"}"#).unwrap();
         collection.insert(&doc2, &mut page_cache, &mut allocator);
 
-        let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
+        let mut iter = collection.indices[0].btree.iterate(false, &mut page_cache);
         let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
         assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).unwrap()), docid1).unwrap());
         assert_eq!(u64::from_be_bytes(val1.try_into().unwrap()), docid1.0);
@@ -792,7 +769,7 @@ mod tests {
         let doc2 = serde_json::from_str(r#"{"name": {"foo": 1}}"#).unwrap();
         collection.insert(&doc2, &mut page_cache, &mut allocator);
 
-        let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
+        let mut iter = collection.indices[0].btree.iterate(false, &mut page_cache);
         let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
         assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).unwrap()), docid1).unwrap());
         assert_eq!(u64::from_be_bytes(val1.try_into().unwrap()), docid1.0);
@@ -811,7 +788,7 @@ mod tests {
         let doc2 = serde_json::from_str(r#"{"name": [1,2,3]}"#).unwrap();
         collection.insert(&doc2, &mut page_cache, &mut allocator);
 
-        let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache);
+        let mut iter = collection.indices[0].btree.iterate(false, &mut page_cache);
         let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
         assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).unwrap()), docid1).unwrap());
         assert_eq!(u64::from_be_bytes(val1.try_into().unwrap()), docid1.0);
@@ -932,7 +909,7 @@ mod tests {
 
         // Ensure this is removed from all indices
         {
-            let mut iter = btree_iterate(collection.indices[0].btree_root, false, &mut page_cache); // foo
+            let mut iter = collection.indices[0].btree.iterate(false, &mut page_cache); // foo
             let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
             assert_eq!(key1, encode_key(&Value::String("AAA".to_string()), docid1).unwrap());
             assert_eq!(u64::from_be_bytes(val1.try_into().unwrap()), docid1.0);
@@ -950,7 +927,7 @@ mod tests {
 
         // Second index
         {
-            let mut iter = btree_iterate(collection.indices[1].btree_root, false, &mut page_cache); // bar
+            let mut iter = collection.indices[1].btree.iterate(false, &mut page_cache); // bar
             let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
             assert_eq!(key1, encode_key(&Value::Number(Number::from_f64(1.2).unwrap()), docid1).unwrap());
             assert_eq!(u64::from_be_bytes(val1.try_into().unwrap()), docid1.0);
@@ -968,7 +945,7 @@ mod tests {
 
         // Scan main document btree
         {
-            let mut iter = btree_iterate(collection.document_btree_root, false, &mut page_cache); // bar
+            let mut iter = collection.document_tree.iterate(false, &mut page_cache); // bar
             let Some((key1, _)) = iter.next() else { panic!("iterator did not return value") };
             assert_eq!(key1, docid1.0.to_be_bytes());
 
@@ -988,7 +965,7 @@ mod tests {
         let (mut page_cache, mut allocator, mut collection) = create_collection();
         let _transaction = page_cache.begin_transaction();
         collection.delete(DocId(999), &mut page_cache, &mut allocator);
-        let mut cursor = btree_iterate(collection.document_btree_root, false, &mut page_cache);
+        let mut cursor = collection.document_tree.iterate(false, &mut page_cache);
         assert_eq!(cursor.next(), None);
     }
 
@@ -1006,7 +983,7 @@ mod tests {
         collection.delete(docid1, &mut page_cache, &mut allocator);
 
         // Ensure second record is still present
-        let mut cursor = btree_iterate(collection.document_btree_root, false, &mut page_cache);
+        let mut cursor = collection.document_tree.iterate(false, &mut page_cache);
         let Some((key2, _)) = cursor.next() else { panic!("iterator did not return value") };
         assert_eq!(key2, docid2.0.to_be_bytes());
         assert_eq!(cursor.next(), None);
@@ -1027,7 +1004,7 @@ mod tests {
         collection.delete(docid1, &mut page_cache, &mut allocator);
 
         // Ensure second record is still present
-        let mut cursor = btree_iterate(collection.document_btree_root, false, &mut page_cache);
+        let mut cursor = collection.document_tree.iterate(false, &mut page_cache);
         let Some((key2, _)) = cursor.next() else { panic!("iterator did not return value") };
         assert_eq!(key2, docid2.0.to_be_bytes());
         assert_eq!(cursor.next(), None);
