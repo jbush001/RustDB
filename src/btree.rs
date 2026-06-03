@@ -88,21 +88,19 @@ impl Iterator for BTreeCursor {
     }
 }
 
-pub struct BTree {
-    root: FilePageId
-}
+pub struct BTree(FilePageId);
 
 impl BTree {
     pub fn new(page_cache: &PageCache, page_allocator: &mut PageAllocator) -> Self {
-        let root = page_allocator.alloc();
-        let mut page = page_cache.lock_page_mut(root);
+        let btree_root = page_allocator.alloc();
+        let mut page = page_cache.lock_page_mut(btree_root);
         init_btree_node(&mut page);
 
-        BTree{ root }
+        BTree(btree_root)
     }
 
     pub fn iterate(&self, reverse: bool, page_cache: &PageCache) -> BTreeCursor {
-        let mut current_node_fpid = self.root;
+        let mut current_node_fpid = self.0;
         loop {
             let page = page_cache.lock_page(current_node_fpid);
             if is_leaf(&page) {
@@ -124,7 +122,7 @@ impl BTree {
     }
 
     pub fn find(&self, key: &[u8], reverse: bool, page_cache: &PageCache) -> BTreeCursor {
-        let mut current_node_fpid = self.root;
+        let mut current_node_fpid = self.0;
         loop {
             let page = page_cache.lock_page(current_node_fpid);
             let index = find_key(&page, key);
@@ -159,7 +157,7 @@ impl BTree {
     fn find_with_path(&self,
         key: &[u8],
         page_cache: &PageCache) -> (Vec<(FilePageId, usize)>, bool) {
-        let mut current_node_fpid = self.root;
+        let mut current_node_fpid = self.0;
         let mut path: Vec<(FilePageId, usize)> = Vec::new();
 
         let found = loop {
@@ -208,7 +206,7 @@ impl BTree {
             }
 
             // Need to split...
-            if *node_fpid == self.root {
+            if *node_fpid == self.0 {
                 // Root node splits are special
                 let new_page_fpid1 = page_allocator.alloc();
                 let new_page_fpid2 = page_allocator.alloc();
@@ -293,7 +291,7 @@ impl BTree {
 
     fn print(&self, page_cache: &PageCache) {
         let mut fifo: Vec<FilePageId> = Vec::new();
-        fifo.push(self.root);
+        fifo.push(self.0);
         while !fifo.is_empty() {
             let fpid = fifo.remove(0);
             let page = page_cache.lock_page(fpid);
@@ -320,6 +318,21 @@ impl BTree {
             }
         }
     }
+}
+
+fn to_hex(bytes: &[u8], mut max_len: usize) -> String {
+    let mut result: String = "".to_string();
+    for x in bytes {
+        if max_len == 0 {
+            result += "...";
+            break;
+        }
+
+        max_len -= 1;
+        result += format!("{:02x}", x).as_str();
+    }
+
+    result
 }
 
 // Create an empty node
@@ -494,7 +507,6 @@ mod tests {
     use crate::superblock::*;
     use rand::rngs::{SmallRng};
     use rand::{SeedableRng, RngExt};
-    use rand::prelude::SliceRandom;
     use std::cmp::{Ord};
     use super::*;
 
@@ -731,6 +743,20 @@ mod tests {
         assert!(!is_leaf(&page));
     }
 
+    // Helper function to create a shuffled list of indices. Each index
+    // is only present once.
+    fn prand_order(n: usize) -> Vec<usize> {
+        let seed = 0xc0fc47a65d406179;
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut result: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            let j = rng.random_range(0..n);
+            result.swap(i, j);
+        }
+
+        result
+    }
+
     fn gen_key_for_index(index: usize) -> Vec<u8> {
         let mut key = index.to_be_bytes().to_vec();
         key.extend_from_slice(&[0u8].repeat(32));
@@ -759,10 +785,7 @@ mod tests {
     fn populate_test_btree() -> (PageCache, PageAllocator, BTree) {
         let (page_cache, mut allocator, tree) = create_test_btree();
         let _transaction = page_cache.begin_transaction();
-        let mut seq: Vec<usize> = (0..NUM_TEST_ENTRIES).collect();
-        seq.shuffle(&mut SmallRng::seed_from_u64(0xc0fc47a65d406179));
-
-        for i in seq {
+        for i in prand_order(NUM_TEST_ENTRIES) {
             tree.insert(&gen_key_for_index(i), &(i as u64).to_le_bytes(), &page_cache, &mut allocator);
         }
 

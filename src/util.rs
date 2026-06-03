@@ -145,21 +145,6 @@ impl<'a> IntoIterator for &'a IndexQueue {
     }
 }
 
-pub fn to_hex(bytes: &[u8], mut max_len: usize) -> String {
-    let mut result: String = "".to_string();
-    for x in bytes {
-        if max_len == 0 {
-            result += "...";
-            break;
-        }
-
-        max_len -= 1;
-        result += format!("{:02x}", x).as_str();
-    }
-
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

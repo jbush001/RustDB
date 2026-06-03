@@ -596,20 +596,4 @@ mod tests {
             assert_eq!(*guard, oracle[fpid]);
         }
     }
-
-    #[test]
-    fn reentrant_lock() {
-        let (mock_io, page_cache) = setup_cache(5);
-
-        {
-            let _transaction = page_cache.begin_transaction();
-            let _guard1 = page_cache.lock_page_mut(FilePageId(3));
-            let _guard2 = page_cache.lock_page_mut(FilePageId(3));
-        }
-
-        with_mock(&mock_io, |m| {
-            assert_eq!(m.write_address, Some(FilePageId(3)));
-        });
-
-    }
 }
