@@ -112,10 +112,27 @@ impl Collection {
             btree: BTree::create(page_cache, page_allocator)
         };
 
-        self.indices.push(index)
+        self.indices.push(index);
 
-        // TODO: if there are documents in the collection, this does not scan to
-        // reindex them.
+        // Scan existing documents and add to index
+        let mut cursor = self.document_tree.iterate(false, page_cache);
+        while let Some((docid_bytes, document_bytes)) = cursor.next() {
+            let docid = DocId(u64::from_be_bytes(docid_bytes.try_into().unwrap()));
+            let document = get_document_body(&document_bytes, page_cache)
+                .expect("Failed to read document body");
+
+            if let Ok(val) = lookup_field(&path, &document) {
+                if let Ok(encoded) = encode_key(&val, docid) {
+                    self.indices.last().unwrap().btree.insert(
+                        &encoded,
+                        &docid.0.to_be_bytes(),
+                        page_cache,
+                        page_allocator);
+                } else {
+                    println!("Error encoding key");
+                }
+            }
+        }
     }
 
     pub fn get(&self, docid: DocId, page_cache: &PageCache) -> Option<Value> {
@@ -475,6 +492,9 @@ mod tests {
     use std::rc::Rc;
     use std::cell::RefCell;
     use serde_json::{Value, json, Number};
+    use rand::seq::SliceRandom;
+    use rand::rngs::{SmallRng};
+    use rand::{SeedableRng};
     use super::*;
 
     fn create_document(index: usize) -> Value {
@@ -793,6 +813,33 @@ mod tests {
         assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).unwrap()), docid1).unwrap());
         assert_eq!(u64::from_be_bytes(val1.try_into().unwrap()), docid1.0);
         assert_eq!(iter.next(), None);
+    }
+
+    // Add an index after populating the collection, ensure it reindexes
+    #[test]
+    fn test_create_index_after() {
+        let (mut page_cache, mut allocator, collection) = create_collection();
+        let collection_ref: Rc<RefCell<Collection>> = Rc::new(RefCell::new(collection));
+
+        let _transaction = page_cache.begin_transaction();
+
+        let mut rng = SmallRng::seed_from_u64(12345u64);
+        let mut shuffled_keys: Vec<u64> = (0..10).collect();
+        shuffled_keys.shuffle(&mut rng);
+
+        let mut orig_docs: Vec<(DocId, Value)> = Vec::new();
+        for key in shuffled_keys {
+            let doc: Value = json!({"key": key});
+            orig_docs.push((collection_ref.borrow_mut().insert(&doc, &mut page_cache, &mut allocator),
+                doc.clone()));
+        }
+
+        collection_ref.borrow_mut().create_index(&FieldPath::new("key").unwrap(), &mut page_cache, &mut allocator);
+        orig_docs.sort_by_key(|(_docid, doc)| doc["key"].as_u64().unwrap());
+
+        let fetched_docs: Vec<_> = IndexScan::new(collection_ref, 0, None, None, false,
+            &page_cache).expect("Failed to scan index").collect();
+        assert_eq!(orig_docs, fetched_docs);
     }
 
     #[test]
