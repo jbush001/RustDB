@@ -93,6 +93,7 @@ pub struct BTree {
 }
 
 impl BTree {
+    // Allocate a new page and initializes an on-disk btree
     pub fn create(page_cache: &PageCache, page_allocator: &mut PageAllocator) -> Self {
         let root = page_allocator.alloc();
         let mut page = page_cache.lock_page_mut(root);
@@ -101,7 +102,10 @@ impl BTree {
         BTree { root }
     }
 
-    // TODO: create a btree given an existing root page
+    // Create a btree wrapper for an existing btree
+    pub fn open(root: FilePageId) -> Self {
+        BTree { root }
+    }
 
     pub fn iterate(&self, reverse: bool, page_cache: &PageCache) -> BTreeCursor {
         let mut current_node_fpid = self.root;
@@ -515,16 +519,16 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut page);
 
-        append_entry(&mut page, "foobar".as_bytes(), "abcdefghijklmnopqrstuwxyz".as_bytes());
-        append_entry(&mut page, "zzzz".as_bytes(), "3.1415926535897932384626433832".as_bytes());
+        append_entry(&mut page, b"foobar", b"abcdefghijklmnopqrstuwxyz");
+        append_entry(&mut page, b"zzzz", b"3.1415926535897932384626433832");
         sanity_check_node(&page);
         assert_eq!(get_num_vararray_entries(&page), 2);
 
-        assert_eq!(get_entry_key(&page, 0), "foobar".as_bytes());
-        assert_eq!(get_entry_value(&page, 0), "abcdefghijklmnopqrstuwxyz".as_bytes());
+        assert_eq!(get_entry_key(&page, 0), b"foobar");
+        assert_eq!(get_entry_value(&page, 0), b"abcdefghijklmnopqrstuwxyz");
 
-        assert_eq!(get_entry_key(&page, 1), "zzzz".as_bytes());
-        assert_eq!(get_entry_value(&page, 1), "3.1415926535897932384626433832".as_bytes());
+        assert_eq!(get_entry_key(&page, 1), b"zzzz");
+        assert_eq!(get_entry_value(&page, 1), b"3.1415926535897932384626433832");
     }
 
     #[test]
@@ -532,19 +536,19 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut page);
 
-        append_entry(&mut page, "aaaa".as_bytes(), &[0u8]);
-        append_entry(&mut page, "bbbb".as_bytes(), &[0u8]);
-        append_entry(&mut page, "cccc".as_bytes(), &[0u8]);
-        append_entry(&mut page, "dddd".as_bytes(), &[0u8]);
+        append_entry(&mut page, b"aaaa", b"[0u8]");
+        append_entry(&mut page, b"bbbb", b"[0u8]");
+        append_entry(&mut page, b"cccc", b"[0u8]");
+        append_entry(&mut page, b"dddd", b"[0u8]");
         sanity_check_node(&page);
         assert_eq!(get_num_vararray_entries(&page), 4);
 
-        assert_eq!(find_key(&page, "aaa".as_bytes()), 0); // Search key is before first key
-        assert_eq!(find_key(&page, "aaaa".as_bytes()), 0); // Equal to first key
-        assert_eq!(find_key(&page, "aaab".as_bytes()), 1); // Between first and second key
-        assert_eq!(find_key(&page, "bbbb".as_bytes()), 1); // Equal to second key
-        assert_eq!(find_key(&page, "bbbc".as_bytes()), 2); // Between second and third key
-        assert_eq!(find_key(&page, "eeee".as_bytes()), 4); // Larger than largest key
+        assert_eq!(find_key(&page, b"aaa"), 0); // Search key is before first key
+        assert_eq!(find_key(&page, b"aaaa"), 0); // Equal to first key
+        assert_eq!(find_key(&page, b"aaab"), 1); // Between first and second key
+        assert_eq!(find_key(&page, b"bbbb"), 1); // Equal to second key
+        assert_eq!(find_key(&page, b"bbbc"), 2); // Between second and third key
+        assert_eq!(find_key(&page, b"eeee"), 4); // Larger than largest key
     }
 
     #[test]
@@ -552,7 +556,7 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut page);
 
-        assert_eq!(find_key(&page, "foo".as_bytes()), 0);
+        assert_eq!(find_key(&page, b"foo"), 0);
     }
 
     // Validates get_vararray_free_space and get_entry_size return
@@ -562,20 +566,20 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut page);
         let init_free_space = get_vararray_free_space(&page);
-        let key1 = "foo".as_bytes();
-        let val1 = "00000000000000000000000000000".as_bytes();
-        insert_entry(&mut page, key1, &val1);
+        let key1 = b"foo";
+        let val1 = b"00000000000000000000000000000";
+        insert_entry(&mut page, key1, val1);
         assert_lt!(get_vararray_free_space(&page), init_free_space);
         assert_eq!(get_vararray_free_space(&page), init_free_space -
-            get_entry_size(key1, &val1));
+            get_entry_size(key1, val1));
 
-        let key2 = "abcdefghijklmnopqrstuvwxyz".as_bytes();
-        let val2 = "..ooOOO".as_bytes();
+        let key2 = b"abcdefghijklmnopqrstuvwxyz";
+        let val2 = b"..ooOOO";
         let init_free_space = get_vararray_free_space(&page);
-        insert_entry(&mut page, key2, &val2);
+        insert_entry(&mut page, key2, val2);
         assert_lt!(get_vararray_free_space(&page), init_free_space);
         assert_eq!(get_vararray_free_space(&page), init_free_space -
-            get_entry_size(key2, &val2));
+            get_entry_size(key2, val2));
     }
 
     #[test]
@@ -584,17 +588,17 @@ mod tests {
         init_btree_node(&mut page);
 
         // Note these are out of order
-        insert_entry(&mut page, "aardvark".as_bytes(), &[0u8]);
-        insert_entry(&mut page, "zebra".as_bytes(), &[0u8]);
-        insert_entry(&mut page, "apple".as_bytes(), &[0u8]);
-        insert_entry(&mut page, "banana".as_bytes(), &[0u8]);
+        insert_entry(&mut page, b"aardvark", b"[0u8]");
+        insert_entry(&mut page, b"zebra", b"[0u8]");
+        insert_entry(&mut page, b"apple", b"[0u8]");
+        insert_entry(&mut page, b"banana", b"[0u8]");
         sanity_check_node(&page);
         assert_eq!(get_num_vararray_entries(&page), 4);
 
-        assert_eq!(find_key(&page, "aardvark".as_bytes()), 0);
-        assert_eq!(find_key(&page, "apple".as_bytes()), 1);
-        assert_eq!(find_key(&page, "banana".as_bytes()), 2);
-        assert_eq!(find_key(&page, "zebra".as_bytes()), 3);
+        assert_eq!(find_key(&page, b"aardvark"), 0);
+        assert_eq!(find_key(&page, b"apple"), 1);
+        assert_eq!(find_key(&page, b"banana"), 2);
+        assert_eq!(find_key(&page, b"zebra"), 3);
     }
 
     #[test]
@@ -613,8 +617,8 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut page);
 
-        insert_entry(&mut page, "aardvark".as_bytes(), &[0u8]);
-        insert_entry(&mut page, "aardvark".as_bytes(), &[0u8]);
+        insert_entry(&mut page, b"aardvark", b"[0u8]");
+        insert_entry(&mut page, b"aardvark", b"[0u8]");
     }
 
     #[test]
@@ -887,7 +891,7 @@ mod tests {
             let _transaction = page_cache.begin_transaction();
 
             // Key is bogus
-            tree.delete(&"yolo".as_bytes(), &page_cache, &mut allocator);
+            tree.delete(b"yolo", &page_cache, &mut allocator);
         }
 
         let mut cursor = tree.iterate(false, &page_cache);
@@ -998,5 +1002,26 @@ mod tests {
         }
 
         oracle.validate(tree.iterate(false, &page_cache));
+    }
+
+    #[test]
+    fn test_open() {
+        let (page_cache, mut allocator, tree) = create_test_btree();
+        let root_fpid = tree.root;
+
+        // Insert an entry and then drop the tree and page cache, simulating
+        // closing and reopening the database.
+        {
+            let _transaction = page_cache.begin_transaction();
+            tree.insert(b"abcd", b"efg", &page_cache, &mut allocator);
+        }
+
+        drop(tree);
+
+        let tree = BTree::open(root_fpid);
+        let mut cursor = tree.iterate(false, &page_cache);
+        let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
+        assert_eq!(key.as_slice(), b"abcd");
+        assert_eq!(val.as_slice(), b"efg");
     }
 }
