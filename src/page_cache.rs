@@ -250,11 +250,13 @@ impl PageCacheInner {
         let cp = &mut self.pages[cache_slot];
         assert!(!cp.dirty || self.transaction_active);
         cp.ref_count -= 1;
-        if cp.dirty {
-            self.dirty_page_list.push_head(cache_slot);
-        } else if self.pages[cache_slot].ref_count == 0 {
-            // Put back in LRU
-            self.lru.push_head(cache_slot);
+        if cp.ref_count == 0 {
+            if cp.dirty {
+                self.dirty_page_list.push_head(cache_slot);
+            } else if self.pages[cache_slot].ref_count == 0 {
+                // Put back in LRU
+                self.lru.push_head(cache_slot);
+            }
         }
     }
 
@@ -595,5 +597,15 @@ mod tests {
             let guard = page_cache.lock_page(FilePageId(fpid as u64));
             assert_eq!(*guard, oracle[fpid]);
         }
+    }
+
+    #[test]
+    fn test_page_multilock() {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> =
+            Rc::new(RefCell::new(MockPersistentStore::default()));
+        let page_cache = PageCache::new(10, Rc::clone(&mock_io));
+        let _transaction = page_cache.begin_transaction();
+        let _guard1 = page_cache.lock_page_mut(FilePageId(3));
+        let _guard2 = page_cache.lock_page_mut(FilePageId(3));
     }
 }

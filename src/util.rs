@@ -84,9 +84,16 @@ impl IndexQueue {
                 self.head = self.next[index];
             }
         }
+
+        self.next[index] = None;
+        self.prev[index] = None;
     }
 
     pub fn push_head(&mut self, index: usize) {
+        assert!(self.prev[index] == None);
+        assert!(self.next[index] == None);
+        assert!(self.head != Some(index));
+        assert!(self.tail != Some(index));
         match self.head {
             Some(head) => {
                 self.prev[head] = Some(index);
@@ -393,5 +400,13 @@ mod tests {
             expect_index -= 1;
             assert_eq!(expect_index, element);
         }
+    }
+
+    #[test]
+    #[should_panic = "assertion failed: self.head != Some(index)"]
+    fn test_double_push() {
+        let mut queue = IndexQueue::new(10);
+        queue.push_head(0);
+        queue.push_head(0);
     }
 }

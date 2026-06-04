@@ -33,7 +33,7 @@ pub struct PageAllocator {
 
 impl PageAllocator {
     pub fn new(page_cache: &PageCache) -> Self {
-        let page = page_cache.lock_page_mut(SUPERBLOCK_FPID);
+        let page = page_cache.lock_page(SUPERBLOCK_FPID);
         let superblock = get_superblock(&page);
 
         assert!(superblock.file_size > 0);
