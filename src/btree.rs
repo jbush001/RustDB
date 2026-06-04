@@ -536,10 +536,10 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut page);
 
-        append_entry(&mut page, b"aaaa", b"[0u8]");
-        append_entry(&mut page, b"bbbb", b"[0u8]");
-        append_entry(&mut page, b"cccc", b"[0u8]");
-        append_entry(&mut page, b"dddd", b"[0u8]");
+        append_entry(&mut page, b"aaaa", &[0u8]);
+        append_entry(&mut page, b"bbbb", &[0u8]);
+        append_entry(&mut page, b"cccc", &[0u8]);
+        append_entry(&mut page, b"dddd", &[0u8]);
         sanity_check_node(&page);
         assert_eq!(get_num_vararray_entries(&page), 4);
 
@@ -588,10 +588,10 @@ mod tests {
         init_btree_node(&mut page);
 
         // Note these are out of order
-        insert_entry(&mut page, b"aardvark", b"[0u8]");
-        insert_entry(&mut page, b"zebra", b"[0u8]");
-        insert_entry(&mut page, b"apple", b"[0u8]");
-        insert_entry(&mut page, b"banana", b"[0u8]");
+        insert_entry(&mut page, b"aardvark", &[0u8]);
+        insert_entry(&mut page, b"zebra", &[0u8]);
+        insert_entry(&mut page, b"apple", &[0u8]);
+        insert_entry(&mut page, b"banana", &[0u8]);
         sanity_check_node(&page);
         assert_eq!(get_num_vararray_entries(&page), 4);
 
@@ -617,8 +617,8 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_btree_node(&mut page);
 
-        insert_entry(&mut page, b"aardvark", b"[0u8]");
-        insert_entry(&mut page, b"aardvark", b"[0u8]");
+        insert_entry(&mut page, b"aardvark", &[0u8]);
+        insert_entry(&mut page, b"aardvark", &[0u8]);
     }
 
     #[test]
