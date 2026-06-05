@@ -210,10 +210,10 @@ impl PageCacheInner {
                         self.dirty_page_list.remove(cache_slot);
                     } else {
                         self.lru.remove(cache_slot);
-                        cp.dirty = writable;
                     }
                 }
 
+                cp.dirty |= writable;
                 cp.ref_count += 1;
                 cache_slot
             },
@@ -306,8 +306,6 @@ mod tests {
     use std::any::Any;
     use rand::rngs::{SmallRng};
     use rand::{SeedableRng, RngExt};
-    use rand::seq::SliceRandom;
-    use rand::prelude::IndexedRandom;
     use crate::mocks::*;
     use super::*;
 
@@ -562,6 +560,61 @@ mod tests {
         });
     }
 
+    // Lock the same page twice for write in the same transaction
+    // Regression test, this would hang previously because it would
+    // reinsert the page into the dirty list, creating a loop.
+    #[test]
+    fn test_page_lock_write_then_write() {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> =
+            Rc::new(RefCell::new(MockPersistentStore::default()));
+        let page_cache = PageCache::new(10, Rc::clone(&mock_io));
+        let _transaction = page_cache.begin_transaction();
+        let _guard1 = page_cache.lock_page_mut(FilePageId(3));
+        let _guard2 = page_cache.lock_page_mut(FilePageId(3));
+    }
+
+    // Lock first read, then write, ensure it gets written back
+    // Regression test, would not write back previously; it would
+    // only set the writable flag when the reference count was zero.
+    #[test]
+    fn test_page_lock_read_then_write() {
+        let (mock_io, page_cache) = setup_cache(5);
+
+        const WRITE_VAL: u8 = 0xcc;
+        {
+            let _transaction = page_cache.begin_transaction();
+            let _guard1 = page_cache.lock_page(FilePageId(3));
+            let mut guard = page_cache.lock_page_mut(FilePageId(3));
+            (*guard)[0] = WRITE_VAL;
+        }
+
+        with_mock(&mock_io, |m| {
+            assert_eq!(m.write_address, Some(FilePageId(3)));
+            assert_eq!(m.write_data, WRITE_VAL);
+        });
+    }
+
+    // Ensure we don't clear the writable flag when relocking for read.
+    #[test]
+    fn test_page_lock_write_then_read() {
+        let (mock_io, page_cache) = setup_cache(5);
+
+        const WRITE_VAL: u8 = 0xcc;
+        {
+            let _transaction = page_cache.begin_transaction();
+            let mut guard1 = page_cache.lock_page_mut(FilePageId(3));
+            (*guard1)[0] = WRITE_VAL;
+
+            let _guard2 = page_cache.lock_page(FilePageId(3));
+        }
+
+        with_mock(&mock_io, |m| {
+            assert_eq!(m.write_address, Some(FilePageId(3)));
+            assert_eq!(m.write_data, WRITE_VAL);
+        });
+    }
+
+
     #[test]
     fn test_page_cache_stress() {
         const TOTAL_PAGES: usize = 30;
@@ -577,19 +630,28 @@ mod tests {
 
         for _ in 0..10000 {
             let _transaction = page_cache.begin_transaction();
-            let num_pages = rng.random_range(1..5);
-            let mut to_update: Vec<usize> = page_indices.sample(&mut rng, num_pages).copied().collect();
-            to_update.shuffle(&mut rng);
-            let mut guards: Vec<PageGuardMut> = Vec::new();
-            for fpid in &to_update {
-                let mut guard = page_cache.lock_page_mut(FilePageId(*fpid as u64));
-                assert_eq!(*guard, oracle[*fpid]);
-                rng.fill(&mut oracle[*fpid]);
-                guard.copy_from_slice(oracle[*fpid].as_slice());
-                guards.push(guard);
+            let mut guards: Vec<PageGuard> = Vec::new();
+            let mut mut_guards: Vec<PageGuardMut> = Vec::new();
+
+            // Lock up to 5 pages.
+            for _ in 0..rng.random_range(1..5) {
+                // Note the same file page may be locked multiple times (3.33% chance)
+                let fpid = rng.random_range(0..TOTAL_PAGES);
+                // Randomly decide if to lock for read or write
+                if rng.random::<f32>() > 0.5 {
+                    let mut guard = page_cache.lock_page_mut(FilePageId(fpid as u64));
+                    assert_eq!(*guard, oracle[fpid]);
+                    rng.fill(&mut oracle[fpid]);
+                    guard.copy_from_slice(oracle[fpid].as_slice());
+                    mut_guards.push(guard);
+                } else {
+                    let guard = page_cache.lock_page(FilePageId(fpid as u64));
+                    assert_eq!(*guard, oracle[fpid]);
+                    guards.push(guard);
+                }
             }
 
-            // Note: guard are dropped here, forcing writeback
+            // Note: guard are dropped here
         }
 
         // Check all pages
@@ -597,15 +659,5 @@ mod tests {
             let guard = page_cache.lock_page(FilePageId(fpid as u64));
             assert_eq!(*guard, oracle[fpid]);
         }
-    }
-
-    #[test]
-    fn test_page_multilock() {
-        let mock_io: Rc<RefCell<dyn PersistentStore>> =
-            Rc::new(RefCell::new(MockPersistentStore::default()));
-        let page_cache = PageCache::new(10, Rc::clone(&mock_io));
-        let _transaction = page_cache.begin_transaction();
-        let _guard1 = page_cache.lock_page_mut(FilePageId(3));
-        let _guard2 = page_cache.lock_page_mut(FilePageId(3));
     }
 }
