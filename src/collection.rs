@@ -58,6 +58,16 @@ impl Collection {
 
         let docid = self.next_docid;
         self.next_docid += 1;
+        self.insert_internal(DocId(docid), document, page_cache, page_allocator);
+        DocId(docid)
+    }
+
+    fn insert_internal(&mut self,
+        docid: DocId,
+        document: &Value,
+        page_cache: &PageCache,
+        page_allocator: &mut PageAllocator) {
+
         let mut content = Vec::with_capacity(1024);
         content.push(0); // flag byte
         serde_json::to_writer(&mut content, &document).expect("serialization failed");
@@ -86,25 +96,23 @@ impl Collection {
                 offset += to_copy;
             }
 
-            self.document_tree.insert(&docid.to_be_bytes(), &pointer, page_cache, page_allocator);
+            self.document_tree.insert(&docid.0.to_be_bytes(), &pointer, page_cache, page_allocator);
         } else {
-            self.document_tree.insert(&docid.to_be_bytes(), &content, page_cache, page_allocator);
+            self.document_tree.insert(&docid.0.to_be_bytes(), &content, page_cache, page_allocator);
         }
 
         // Update indices
         for index in &mut self.indices {
             if let Ok(val) = lookup_field(&index.field, document) {
-                if let Ok(encoded) = encode_key(&val, DocId(docid)) {
+                if let Ok(encoded) = encode_key(&val, docid) {
                     index.btree.insert(
                         &encoded,
-                        &docid.to_be_bytes(),
+                        &docid.0.to_be_bytes(),
                         page_cache,
                         page_allocator);
                 }
             }
         }
-
-        DocId(docid)
     }
 
     pub fn create_index(&mut self, path: &FieldPath, page_cache: &PageCache,
@@ -148,6 +156,17 @@ impl Collection {
         }
 
         Some(get_document_body(&document_bytes, page_cache))
+    }
+
+    pub fn update(&mut self,
+        docid: DocId,
+        document: &Value,
+        page_cache: &PageCache,
+        page_allocator: &mut PageAllocator) {
+
+        // TODO optimize this.
+        self.delete(docid, page_cache, page_allocator);
+        self.insert_internal(docid, document, page_cache, page_allocator);
     }
 
     // TODO decide how to handle missing document. Should it be an error, or is it
@@ -939,6 +958,34 @@ mod tests {
         assert!(path.is_err());
         assert_eq!(path.err().unwrap(), "Empty path element".to_string());
     }
+
+    #[test]
+    fn test_update() {
+        let (page_cache, mut page_allocator, collection, documents) = populate_test_collection();
+        let collection_ref: Rc<RefCell<Collection>> = Rc::new(RefCell::new(collection));
+
+        let _transaction = page_cache.begin_transaction();
+        let mut new_doc = documents[1].1.clone();
+        let new_name = Value::String(format!("Dr. {}", documents[1].1["name"].as_str().unwrap()));
+        new_doc["name"] = new_name;
+        collection_ref.borrow_mut().update(documents[1].0, &new_doc,
+            &page_cache, &mut page_allocator);
+        let mut new_documents: Vec<_> = documents.iter().map(|(docid, doc)| {
+            if *docid == documents[1].0 {
+                (*docid, new_doc.clone())
+            } else {
+                (*docid, doc.clone())
+            }
+        }).collect();
+
+        let iter = IndexScan::new(collection_ref, 0, None, None, false,
+            &page_cache).expect("Failed to scan index");
+        let got_documents: Vec<_> = iter.collect();
+
+        new_documents.sort_by_key(|(_docid, doc)| doc["name"].as_str().unwrap().to_string());
+        assert_eq!(new_documents, got_documents);
+    }
+
 
     #[test]
     fn test_delete() {
