@@ -20,7 +20,6 @@
 // for any indices fields within these documents to allow fast sorting and
 // searching.
 
-// TODO: collection metadata is not persisted.
 // TODO: when this detects database corruption, it currently panics. Decide
 // how to handle this.
 
@@ -29,7 +28,7 @@ use crate::page_allocator::*;
 use crate::page_cache::*;
 use crate::util::*;
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -51,6 +50,45 @@ pub struct Collection {
 }
 
 impl Collection {
+    pub fn open(metadata: &Value) -> Self {
+        let mut indices: Vec<Index> = Vec::new();
+        for index in metadata["indices"].as_array().expect("indices is not an array") {
+            indices.push(Index{
+                field: FieldPath::new(index["path"].as_str()
+                    .expect("path is not a string")).expect("invalid field path"),
+                btree: BTree::open(FilePageId(index["root_fpid"].as_u64()
+                    .expect("root_fpid is not an integer")))
+            });
+        }
+
+        Collection {
+            next_docid: 1,
+            document_tree: BTree::open(FilePageId(metadata["root_page_fpid"].as_u64()
+                .expect("root_page_fpid is not an integer"))),
+            indices
+        }
+    }
+
+    pub fn create(page_cache: &PageCache,page_allocator: &mut PageAllocator) -> Self {
+        Collection {
+            next_docid: 1,
+            document_tree: BTree::create(page_cache, page_allocator),
+            indices: Vec::new()
+        }
+    }
+
+    pub fn get_metadata(&self) -> Value {
+        json!({
+            "root_page_fpid": self.document_tree.get_root_page_id().0,
+            "indices": self.indices.iter().map(|index| {
+                json!({
+                    "path": index.field.to_string(),
+                    "root_fpid": index.btree.get_root_page_id().0
+                })
+            }).collect::<Vec<Value>>()
+        })
+    }
+
     pub fn insert(&mut self,
         document: &Value,
         page_cache: &PageCache,
@@ -416,8 +454,8 @@ enum PathElement {
 impl std::fmt::Display for PathElement {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         match self {
-            PathElement::ArrayIndex(index) => write!(f, "[{}]", index)?,
-            PathElement::FieldName(name) => write!(f, ".{}", name)?
+            PathElement::ArrayIndex(index) => { write!(f, "[{}]", index)?; }
+            PathElement::FieldName(name) => { write!(f, "{}", name)?; }
         }
 
         Ok(())
@@ -430,8 +468,12 @@ pub struct FieldPath(Vec<PathElement>);
 
 impl std::fmt::Display for FieldPath {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        for elem in &self.0 {
-            elem.fmt(f)?;
+        for (i, elem) in self.0.iter().enumerate() {
+            if i > 0 && matches!(elem, PathElement::FieldName(_)) {
+                write!(f, ".")?;
+            }
+
+            write!(f, "{}", elem)?;
         }
 
         Ok(())
@@ -503,7 +545,6 @@ pub fn lookup_field(path: &FieldPath, record: &Value) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::btree::*;
     use crate::mocks::{MockPersistentStore};
     use crate::page_cache::*;
     use crate::superblock::*;
@@ -520,6 +561,49 @@ mod tests {
             "index": index,
             "value": "abcdefgjiklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         })
+    }
+
+    fn create_collection() -> (PageCache, PageAllocator, Collection) {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
+        let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
+        let _transaction = page_cache.begin_transaction();
+        {
+            let mut page = page_cache.lock_page_mut(SUPERBLOCK_FPID);
+            init_superblock(&mut page);
+        }
+
+        let mut allocator = PageAllocator::new(&mut page_cache);
+        let collection = Collection::create(&page_cache, &mut allocator);
+
+        (page_cache, allocator, collection)
+    }
+
+    fn populate_test_collection() -> (PageCache, PageAllocator, Collection, Vec<(DocId, Value)>) {
+        let (mut page_cache, mut allocator, mut collection) = create_collection();
+
+        let _transaction = page_cache.begin_transaction();
+        collection.create_index(&FieldPath::new("name").unwrap(), &mut page_cache, &mut allocator);
+        collection.create_index(&FieldPath::new("age").unwrap(), &mut page_cache, &mut allocator);
+        collection.create_index(&FieldPath::new("avg").unwrap(), &mut page_cache, &mut allocator);
+
+        let entries: [&str; _] = [
+            r#"{"name": "James Smith", "age": 9, "avg": 0.160}"#,
+            r#"{"name": "Edward Jones", "age": 32, "avg": 0.220}"#,
+            r#"{"name": "Michael James", "age": 47, "avg": 0.116}"#,
+            r#"{"name": "Adam Mitchell", "age": 103, "avg": 0.010}"#,
+            r#"{"name": "Emily Davis", "age": 22, "avg": 0.305}"#,
+            r#"{"name": "Madison Garcia", "age": 19, "avg": 0.250}"#,
+            r#"{"name": "David Wilson", "age": 56, "avg": 0.180}"#,
+        ];
+
+        let mut documents: Vec<(DocId, Value)> = Vec::new();
+        for entry in entries {
+            let doc: Value = serde_json::from_str(entry).unwrap();
+            documents.push((collection.insert(&doc, &mut page_cache, &mut allocator),
+                doc.clone()));
+        }
+
+        (page_cache, allocator, collection, documents)
     }
 
     #[test]
@@ -573,6 +657,40 @@ mod tests {
     }
 
     #[test]
+    fn test_create_reopen() {
+        let (page_cache, mut allocator, mut collection) = create_collection();
+
+        let docids = {
+            let _transaction = page_cache.begin_transaction();
+            collection.create_index(&FieldPath::new("index").unwrap(), &page_cache, &mut allocator);
+            vec![
+                collection.insert(&create_document(1), &page_cache, &mut allocator),
+                collection.insert(&create_document(2), &page_cache, &mut allocator)
+            ]
+        };
+
+        let metadata = collection.get_metadata();
+        drop(collection);
+
+        let collection = Collection::open(&metadata);
+
+        assert_eq!(collection.get(docids[0], &page_cache).unwrap(), create_document(1));
+        assert_eq!(collection.get(docids[1], &page_cache).unwrap(), create_document(2));
+
+        // Ensure index is correct
+        assert_eq!(collection.indices.len(), 1);
+        assert_eq!(collection.indices[0].field.to_string(), "index");
+
+        let mut index_iter = collection.indices[0].btree.iterate(false, &page_cache);
+        let (key1, value1) = index_iter.next().unwrap();
+        assert_eq!(key1, encode_key(&json!(1), docids[0]).unwrap());
+        assert_eq!(value1, docids[0].0.to_be_bytes());
+        let (key2, value2) = index_iter.next().unwrap();
+        assert_eq!(key2, encode_key(&json!(2), docids[1]).unwrap());
+        assert_eq!(value2, docids[1].0.to_be_bytes());
+    }
+
+    #[test]
     fn test_insert() {
         let (page_cache, mut allocator, mut collection) = create_collection();
 
@@ -590,54 +708,6 @@ mod tests {
             assert_eq!(create_document(i), value);
             i += 1;
         }
-    }
-
-    fn create_collection() -> (PageCache, PageAllocator, Collection) {
-        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
-        let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
-        let _transaction = page_cache.begin_transaction();
-        {
-            let mut page = page_cache.lock_page_mut(SUPERBLOCK_FPID);
-            init_superblock(&mut page);
-        }
-
-        let mut allocator = PageAllocator::new(&mut page_cache);
-        let document_tree = BTree::create(&page_cache, &mut allocator);
-        let collection = Collection {
-            next_docid: 1,
-            document_tree,
-            indices: Vec::new()
-        };
-
-        (page_cache, allocator, collection)
-    }
-
-    fn populate_test_collection() -> (PageCache, PageAllocator, Collection, Vec<(DocId, Value)>) {
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
-
-        let _transaction = page_cache.begin_transaction();
-        collection.create_index(&FieldPath::new("name").unwrap(), &mut page_cache, &mut allocator);
-        collection.create_index(&FieldPath::new("age").unwrap(), &mut page_cache, &mut allocator);
-        collection.create_index(&FieldPath::new("avg").unwrap(), &mut page_cache, &mut allocator);
-
-        let entries: [&str; _] = [
-            r#"{"name": "James Smith", "age": 9, "avg": 0.160}"#,
-            r#"{"name": "Edward Jones", "age": 32, "avg": 0.220}"#,
-            r#"{"name": "Michael James", "age": 47, "avg": 0.116}"#,
-            r#"{"name": "Adam Mitchell", "age": 103, "avg": 0.010}"#,
-            r#"{"name": "Emily Davis", "age": 22, "avg": 0.305}"#,
-            r#"{"name": "Madison Garcia", "age": 19, "avg": 0.250}"#,
-            r#"{"name": "David Wilson", "age": 56, "avg": 0.180}"#,
-        ];
-
-        let mut documents: Vec<(DocId, Value)> = Vec::new();
-        for entry in entries {
-            let doc: Value = serde_json::from_str(entry).unwrap();
-            documents.push((collection.insert(&doc, &mut page_cache, &mut allocator),
-                doc.clone()));
-        }
-
-        (page_cache, allocator, collection, documents)
     }
 
     #[test]
@@ -869,7 +939,7 @@ mod tests {
     #[test]
     fn test_path_display() {
         let path = FieldPath::new("phones[1].number").unwrap();
-        assert_eq!(path.to_string(), ".phones[1].number");
+        assert_eq!(path.to_string(), "phones[1].number");
     }
 
     const JSON_EXAMPLE: &str = r#"
@@ -911,7 +981,7 @@ mod tests {
         let doc: Value = serde_json::from_str(JSON_EXAMPLE).unwrap();
         let path = FieldPath::new("age[2]").unwrap();
         assert_eq!(lookup_field(&path, &doc),
-            Err("Indexed non-array .age".to_string()));
+            Err("Indexed non-array age".to_string()));
     }
 
     #[test]
@@ -919,7 +989,7 @@ mod tests {
         let doc: Value = serde_json::from_str(JSON_EXAMPLE).unwrap();
         let path = FieldPath::new("phones[2]").unwrap();
         assert_eq!(lookup_field(&path, &doc),
-            Err("Array index 2 out of bounds for .phones".to_string()));
+            Err("Array index 2 out of bounds for phones".to_string()));
     }
 
     #[test]

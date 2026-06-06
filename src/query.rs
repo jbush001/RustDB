@@ -239,7 +239,7 @@ mod tests {
                     Box::new(ExpressionNode::Constant(json!(105)))
                 )))
             ))),
-            "((.foo > 2) and (.bar < 105))"
+            "((foo > 2) and (bar < 105))"
         );
 
         assert_eq!(
@@ -256,17 +256,17 @@ mod tests {
                     Box::new(ExpressionNode::Constant(json!(105)))
                 )))
             ))),
-            "((.foo >= 2) or (.bar <= 105))"
+            "((foo >= 2) or (bar <= 105))"
         );
 
         assert_eq!(format!("{}", ExpressionNode::BinaryOp((Operation::Neq,
             Box::new(ExpressionNode::Path(FieldPath::new("baz").expect("error creating field path"))),
             Box::new(ExpressionNode::Constant(json!(9)))))),
-            "(.baz <> 9)");
+            "(baz <> 9)");
         assert_eq!(format!("{}", ExpressionNode::BinaryOp((Operation::Eq,
             Box::new(ExpressionNode::Path(FieldPath::new("frob").expect("error creating field path"))),
             Box::new(ExpressionNode::Constant(json!(9)))))),
-            "(.frob = 9)");
+            "(frob = 9)");
     }
 
     #[test]

@@ -108,6 +108,10 @@ impl BTree {
         BTree { root }
     }
 
+    pub fn get_root_page_id(&self) -> FilePageId {
+        self.root
+    }
+
     pub fn iterate(&self, reverse: bool, page_cache: &PageCache) -> BTreeCursor {
         let mut current_node_fpid = self.root;
         loop {
