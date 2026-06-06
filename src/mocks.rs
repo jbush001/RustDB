@@ -20,9 +20,6 @@ use crate::page_cache::*;
 use std::any::Any;
 use std::collections::HashMap;
 
-// This entire file is test-only
-#[cfg(test)]
-
 #[derive(Default)]
 pub struct MockPersistentStore {
     saved_pages: HashMap<FilePageId, PageData>

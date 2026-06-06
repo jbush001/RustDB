@@ -15,15 +15,15 @@
 //
 
 mod btree;
-mod page_cache;
-mod util;
-mod page_allocator;
-mod file_store;
-mod vararray;
-mod mocks;
 mod collection;
-mod superblock;
+mod file_store;
+#[cfg(test)] mod mocks;
+mod page_allocator;
+mod page_cache;
 mod query;
+mod superblock;
+mod util;
+mod vararray;
 
 use crate::file_store::{FileStore};
 use crate::page_allocator::*;
