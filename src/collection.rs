@@ -21,6 +21,8 @@
 // searching.
 
 // TODO: collection metadata is not persisted.
+// TODO: when this detects database corruption, it currently panics. Decide
+// how to handles this.
 
 use serde_json::Value;
 use crate::btree::*;
@@ -118,8 +120,7 @@ impl Collection {
         let mut cursor = self.document_tree.iterate(false, page_cache);
         while let Some((docid_bytes, document_bytes)) = cursor.next() {
             let docid = DocId(u64::from_be_bytes(docid_bytes.try_into().unwrap()));
-            let document = get_document_body(&document_bytes, page_cache)
-                .expect("Failed to read document body");
+            let document = get_document_body(&document_bytes, page_cache);
 
             if let Ok(val) = lookup_field(&path, &document) {
                 if let Ok(encoded) = encode_key(&val, docid) {
@@ -146,7 +147,7 @@ impl Collection {
             return None;
         }
 
-        get_document_body(&document_bytes, page_cache)
+        Some(get_document_body(&document_bytes, page_cache))
     }
 
     // TODO decide how to handle missing document. Should it be an error, or is it
@@ -164,8 +165,7 @@ impl Collection {
             return;
         }
 
-        let document = get_document_body(&document_bytes, page_cache)
-            .expect("Failed to read document body");
+        let document = get_document_body(&document_bytes, page_cache);
 
         // Free overflow pages if present
         if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
@@ -192,7 +192,7 @@ impl Collection {
     }
 }
 
-fn get_document_body(document_bytes: &[u8], page_cache: &PageCache) -> Option<Value> {
+fn get_document_body(document_bytes: &[u8], page_cache: &PageCache) -> Value {
     if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
         // This is using overflow pages
         let mut length = get_u64(document_bytes, 1) as usize;
@@ -201,8 +201,7 @@ fn get_document_body(document_bytes: &[u8], page_cache: &PageCache) -> Option<Va
         let mut content = Vec::with_capacity(length);
         while length > 0 {
             if current_fpid == NULL_FPID {
-                println!("Error: record truncated");
-                break;
+                panic!("Error: record truncated");
             }
 
             let page = page_cache.lock_page(current_fpid);
@@ -212,10 +211,10 @@ fn get_document_body(document_bytes: &[u8], page_cache: &PageCache) -> Option<Va
             length -= to_copy;
         }
 
-        Some(serde_json::from_slice(&content).expect("Failed to parse JSON"))
+        serde_json::from_slice(&content).expect("Failed to parse JSON")
     } else {
         // Stored inline
-        Some(serde_json::from_slice(&document_bytes[1..]).expect("Failed to parse JSON"))
+        serde_json::from_slice(&document_bytes[1..]).expect("Failed to parse JSON")
     }
 }
 
@@ -310,7 +309,7 @@ impl Iterator for SequentialScan {
     fn next(&mut self) -> Option<Self::Item> {
         if let Some((docid_bytes, value_bytes)) = self.iterator.next() {
             let docid = DocId(u64::from_be_bytes(docid_bytes.try_into().unwrap()));
-            let doc = get_document_body(&value_bytes, &self.page_cache)?;
+            let doc = get_document_body(&value_bytes, &self.page_cache);
             Some((docid, doc))
         } else {
             None
@@ -834,6 +833,12 @@ mod tests {
                 doc.clone()));
         }
 
+        // Insert a record with an unindexable key. Ensure indexing code properly ignores it.
+        collection_ref.borrow_mut().insert(&json!({"key": [1,2,3,4,5]}), &mut page_cache, &mut allocator);
+
+        // Create record where the key doesn't exist
+        collection_ref.borrow_mut().insert(&json!({"foo": 0}), &mut page_cache, &mut allocator);
+
         collection_ref.borrow_mut().create_index(&FieldPath::new("key").unwrap(), &mut page_cache, &mut allocator);
         orig_docs.sort_by_key(|(_docid, doc)| doc["key"].as_u64().unwrap());
 
@@ -1079,5 +1084,25 @@ mod tests {
 
         let mut iter = SequentialScan::new(&collection, &page_cache);
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    #[should_panic = "Error: record truncated"]
+    fn test_overflow_truncated() {
+        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let _transaction = page_cache.begin_transaction();
+
+        // Create a large document
+        let large_value = "x".repeat(0x4000);
+        let doc = json!({"foo": large_value});
+        let _docid = collection.insert(&doc, &mut page_cache, &mut allocator);
+
+        // XXX we know an overflow page will be 2
+        {
+            let mut page = page_cache.lock_page_mut(FilePageId(2));
+            page[0..8].fill(0); // Set to null
+        }
+
+        SequentialScan::new(&collection, &page_cache).next();
     }
 }
