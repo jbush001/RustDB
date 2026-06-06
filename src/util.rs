@@ -90,8 +90,8 @@ impl IndexQueue {
     }
 
     pub fn push_head(&mut self, index: usize) {
-        assert!(self.prev[index] == None);
-        assert!(self.next[index] == None);
+        assert!(self.prev[index].is_none());
+        assert!(self.next[index].is_none());
         assert!(self.head != Some(index));
         assert!(self.tail != Some(index));
         match self.head {

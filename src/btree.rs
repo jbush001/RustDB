@@ -15,23 +15,24 @@
 //
 
 // This is a B+ tree implementation. Values are only stored in the leaf nodes.
-
-use crate::util::*;
-use crate::page_cache::{PageCache, FilePageId, PageData, PAGE_SIZE};
-use crate::page_allocator::{PageAllocator, NULL_FPID};
-use crate::vararray::*;
-
-const HEADER_NEXT_SIB_OFFS: usize = 8;
-const HEADER_PREV_SIB_OFFS: usize = 16;
-const HEADER_RIGHT_CHILD_OFFS: usize = 24;
-
-pub const MAX_RECORD_SIZE: usize = (PAGE_SIZE - 32) / 4 - 16; // I added a little padding for safey
-
+// The BTree is structured so that the root node file ID never changes even if
+// it is split. The upper layers depend on this.
 // Each entry is:
 // key_length: u16
 // key: variable length
 // value: variable length
 // (value length is inferred based on record length)
+
+use crate::page_allocator::{PageAllocator, NULL_FPID};
+use crate::page_cache::{PageCache, FilePageId, PageData, PAGE_SIZE};
+use crate::vararray::*;
+use crate::util::*;
+
+const HEADER_NEXT_SIB_OFFS: usize = 8;
+const HEADER_PREV_SIB_OFFS: usize = 16;
+const HEADER_RIGHT_CHILD_OFFS: usize = 24;
+
+pub const MAX_RECORD_SIZE: usize = (PAGE_SIZE - 32) / 4 - 16; // I added a little padding for safety
 
 const FLAG_LEAF: u8 = 1;
 
@@ -468,8 +469,6 @@ fn split_node(orig: &PageData, out1: &mut PageData, out2: &mut PageData) -> Vec<
         // Remove the separator key, which will go into the parent. Save its
         // node pointer into the right child of the left node.
         let separator = get_entry_key(orig, orig_index).to_vec();
-
-
         set_right_child(out1, FilePageId(u64::from_le_bytes(get_entry_value(orig, orig_index)
             .try_into().expect("value was not 8 bytes"))));
         orig_index += 1;
@@ -492,16 +491,16 @@ fn split_node(orig: &PageData, out1: &mut PageData, out2: &mut PageData) -> Vec<
 
 #[cfg(test)]
 mod tests {
-    use more_asserts::{assert_le, assert_lt};
-    use crate::page_allocator::*;
-    use std::rc::Rc;
-    use std::cell::RefCell;
-    use crate::page_cache::*;
     use crate::mocks::{MockPersistentStore};
+    use crate::page_allocator::*;
+    use crate::page_cache::*;
     use crate::superblock::*;
+    use more_asserts::{assert_le, assert_lt};
     use rand::rngs::{SmallRng};
     use rand::{SeedableRng, RngExt};
+    use std::cell::RefCell;
     use std::cmp::{Ord};
+    use std::rc::Rc;
     use super::*;
 
     fn sanity_check_node(page: &PageData) {

@@ -16,9 +16,9 @@
 
 use crate::page_cache::*;
 use std::any::Any;
-use std::io::{Result};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write, Seek, SeekFrom};
+use std::io::{Result};
 
 pub struct FileStore {
     file: File,
@@ -74,10 +74,10 @@ impl PersistentStore for FileStore {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::NamedTempFile;
-    use std::fs;
     use crate::page_cache::*;
+    use std::fs;
     use super::*;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_write() {

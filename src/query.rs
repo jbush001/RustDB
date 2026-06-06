@@ -17,7 +17,6 @@
 use crate::collection::*;
 use serde_json::Value;
 
-
 #[derive(Debug, Clone)]
 enum Operation {
     Gt, Gte, Lt, Lte, Eq, Neq,

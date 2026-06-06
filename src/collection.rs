@@ -22,16 +22,16 @@
 
 // TODO: collection metadata is not persisted.
 // TODO: when this detects database corruption, it currently panics. Decide
-// how to handles this.
+// how to handle this.
 
-use serde_json::Value;
 use crate::btree::*;
-use crate::page_cache::*;
 use crate::page_allocator::*;
-use regex::Regex;
-use std::rc::Rc;
-use std::cell::RefCell;
+use crate::page_cache::*;
 use crate::util::*;
+use regex::Regex;
+use serde_json::Value;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 const FLAG_OVERFLOW: u8 = 0x80;
 
@@ -125,12 +125,12 @@ impl Collection {
         self.indices.push(index);
 
         // Scan existing documents and add to index
-        let mut cursor = self.document_tree.iterate(false, page_cache);
-        while let Some((docid_bytes, document_bytes)) = cursor.next() {
+        let cursor = self.document_tree.iterate(false, page_cache);
+        for (docid_bytes, document_bytes) in cursor {
             let docid = DocId(u64::from_be_bytes(docid_bytes.try_into().unwrap()));
             let document = get_document_body(&document_bytes, page_cache);
 
-            if let Ok(val) = lookup_field(&path, &document) {
+            if let Ok(val) = lookup_field(path, &document) {
                 if let Ok(encoded) = encode_key(&val, docid) {
                     self.indices.last().unwrap().btree.insert(
                         &encoded,
@@ -503,16 +503,16 @@ pub fn lookup_field(path: &FieldPath, record: &Value) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::page_cache::*;
-    use crate::mocks::{MockPersistentStore};
     use crate::btree::*;
+    use crate::mocks::{MockPersistentStore};
+    use crate::page_cache::*;
     use crate::superblock::*;
-    use std::rc::Rc;
-    use std::cell::RefCell;
-    use serde_json::{Value, json, Number};
-    use rand::seq::SliceRandom;
     use rand::rngs::{SmallRng};
     use rand::{SeedableRng};
+    use rand::seq::SliceRandom;
+    use serde_json::{Value, json, Number};
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use super::*;
 
     fn create_document(index: usize) -> Value {

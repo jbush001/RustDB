@@ -14,9 +14,14 @@
 //   limitations under the License.
 //
 
+// Test utilities that are shared between files
+
 use crate::page_cache::*;
-use std::collections::HashMap;
 use std::any::Any;
+use std::collections::HashMap;
+
+// This entire file is test-only
+#[cfg(test)]
 
 #[derive(Default)]
 pub struct MockPersistentStore {
@@ -56,42 +61,37 @@ impl PersistentStore for MockPersistentStore {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[test]
+fn test_read_zeroes() {
+    let mut mock = MockPersistentStore::default();
+    let mut temp: PageData = [0; PAGE_SIZE];
+    mock.read(FilePageId(1), &mut temp);
+    assert_eq!(&temp, &[0; PAGE_SIZE]);
+}
 
-    #[test]
-    fn test_read_zeroes() {
-        let mut mock = MockPersistentStore::default();
-        let mut temp: PageData = [0; PAGE_SIZE];
-        mock.read(FilePageId(1), &mut temp);
-        assert_eq!(&temp, &[0; PAGE_SIZE]);
-    }
+#[test]
+fn test_readback() {
+    let mut mock = MockPersistentStore::default();
+    let mut temp1: PageData = [0xcc; PAGE_SIZE];
+    mock.write(FilePageId(1), &mut temp1);
 
-    #[test]
-    fn test_readback() {
-        let mut mock = MockPersistentStore::default();
-        let mut temp1: PageData = [0xcc; PAGE_SIZE];
-        mock.write(FilePageId(1), &mut temp1);
+    let mut temp2: PageData = [0; PAGE_SIZE];
+    mock.read(FilePageId(1), &mut temp2);
+    assert_eq!(&temp1, &temp2);
 
-        let mut temp2: PageData = [0; PAGE_SIZE];
-        mock.read(FilePageId(1), &mut temp2);
-        assert_eq!(&temp1, &temp2);
+    // Ensure other blocks are zero
+    let mut temp3: PageData = [0; PAGE_SIZE];
+    mock.read(FilePageId(2), &mut temp3);
+    assert_eq!(&[0; PAGE_SIZE], &temp3);
+}
 
-        // Ensure other blocks are zero
-        let mut temp3: PageData = [0; PAGE_SIZE];
-        mock.read(FilePageId(2), &mut temp3);
-        assert_eq!(&[0; PAGE_SIZE], &temp3);
-    }
+#[test]
+fn test_any() {
+    let mut mock = MockPersistentStore::default();
 
-    #[test]
-    fn test_any() {
-        let mut mock = MockPersistentStore::default();
+    let any_ref: &dyn std::any::Any = mock.as_any();
+    assert!(any_ref.is::<MockPersistentStore>(), "Failed to downcast as_any()");
 
-        let any_ref: &dyn std::any::Any = mock.as_any();
-        assert!(any_ref.is::<MockPersistentStore>(), "Failed to downcast as_any()");
-
-        let any_mut: &mut dyn std::any::Any = mock.as_any_mut();
-        assert!(any_mut.is::<MockPersistentStore>(), "Failed to downcast as_any_mut()");
-    }
+    let any_mut: &mut dyn std::any::Any = mock.as_any_mut();
+    assert!(any_mut.is::<MockPersistentStore>(), "Failed to downcast as_any_mut()");
 }

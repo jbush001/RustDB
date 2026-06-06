@@ -17,12 +17,12 @@
 // This module mediates all disk access, keeping recently used pages
 // in memory to optimize I/O.
 
-use std::collections::HashMap;
-use std::rc::Rc;
-use std::cell::RefCell;
-use std::any::Any;
-use std::ops::{Deref, DerefMut};
 use crate::util::*;
+use std::any::Any;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 
 pub const PAGE_SIZE: usize = 0x2000;
 pub type PageData = [u8; PAGE_SIZE];
@@ -301,12 +301,12 @@ impl PageCacheInner {
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
-    use std::cell::RefCell;
-    use std::any::Any;
+    use crate::mocks::*;
     use rand::rngs::{SmallRng};
     use rand::{SeedableRng, RngExt};
-    use crate::mocks::*;
+    use std::any::Any;
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use super::*;
 
     #[derive(Default)]

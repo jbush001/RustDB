@@ -20,8 +20,8 @@
 // linked list structure.
 
 use crate::page_cache::*;
-use crate::util::*;
 use crate::superblock::*;
+use crate::util::*;
 
 pub const NULL_FPID: FilePageId = FilePageId(0);
 
@@ -86,12 +86,12 @@ impl PageAllocator {
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
-    use std::cell::RefCell;
-    use crate::page_cache::*;
-    use more_asserts::{assert_gt};
     use crate::mocks::{MockPersistentStore};
+    use crate::page_cache::*;
     use crate::superblock::*;
+    use more_asserts::{assert_gt};
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use super::*;
 
     #[test]

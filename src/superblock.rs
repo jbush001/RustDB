@@ -18,11 +18,11 @@
 // links out to other file system structures. As such, many other places
 // in the code access it.
 
-use bytemuck::{Pod, Zeroable};
 use crate::page_cache::*;
+use bytemuck::{Pod, Zeroable};
 use std::mem;
 
-const SUPERBLOCK_MAGIC: &str = "RUSTDB00";
+const SUPERBLOCK_MAGIC: &[u8; 8] = b"RUSTDB00";
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -36,14 +36,14 @@ pub const SUPERBLOCK_FPID: FilePageId = FilePageId(0);
 
 pub fn init_superblock(page: &mut PageData) {
     let block = get_superblock_mut(page);
-    block.magic.copy_from_slice(SUPERBLOCK_MAGIC.as_bytes());
+    block.magic.copy_from_slice(SUPERBLOCK_MAGIC);
     block.free_list_head = 0;
     block.file_size = 1;
 }
 
 pub fn check_superblock(page: &PageData) -> Result<(), String> {
     let block = get_superblock(page);
-    if block.magic != SUPERBLOCK_MAGIC.as_bytes() {
+    if block.magic != *SUPERBLOCK_MAGIC {
         return Err("Bad Magic".to_string());
     }
 

@@ -18,8 +18,8 @@
 // sized entries packed into a fixed size page. It's the underlying storage
 // format for BTree nodes.
 
-use crate::util::*;
 use crate::page_cache::{PageData, PAGE_SIZE};
+use crate::util::*;
 
 // header [u8; 32] (used by btree, opaque to this module)
 // data array start offset: u16
@@ -195,8 +195,8 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
-        insert_vararray_entry(&mut page, 0, "aaaaa".as_bytes());
-        insert_vararray_entry(&mut page, 1, "bbbbb".as_bytes());
+        insert_vararray_entry(&mut page, 0, b"aaaaa");
+        insert_vararray_entry(&mut page, 1, b"bbbbb");
         set_u16(&mut page, OFFSETS_LOC + OFFSETS_ENTRY_SIZE, PAGE_SIZE as u16 + 1);
 
         sanity_check_record_array(&page);
@@ -209,8 +209,8 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
-        insert_vararray_entry(&mut page, 0, "a".as_bytes());
-        insert_vararray_entry(&mut page, 1, "z".as_bytes());
+        insert_vararray_entry(&mut page, 0, b"a");
+        insert_vararray_entry(&mut page, 1, b"z");
 
         page[DATA_START_FIELD_OFFS] += 1; // Adjust start of data field
 
@@ -224,8 +224,8 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
-        insert_vararray_entry(&mut page, 0, "a".as_bytes());
-        insert_vararray_entry(&mut page, 1, "z".as_bytes());
+        insert_vararray_entry(&mut page, 0, b"a");
+        insert_vararray_entry(&mut page, 1, b"z");
 
         page[OFFSETS_LOC + OFFSETS_ENTRY_SIZE + 2] += 1; // Increase the length by one byte
 
@@ -237,11 +237,11 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
-        let record1 = "aaaa".as_bytes();
-        insert_vararray_entry(&mut page, 0, &record1);
+        let record1 = b"aaaa";
+        insert_vararray_entry(&mut page, 0, record1);
 
-        let record2 = "bbbbb".as_bytes();
-        insert_vararray_entry(&mut page, 1, &record2);
+        let record2 = b"bbbbb";
+        insert_vararray_entry(&mut page, 1, record2);
 
         assert_eq!(record1, get_vararray_entry(&page, 0));
         assert_eq!(record2, get_vararray_entry(&page, 1));
@@ -254,11 +254,11 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
-        let record1 = "aaaa".as_bytes();
-        insert_vararray_entry(&mut page, 0, &record1);
+        let record1 = b"aaaa";
+        insert_vararray_entry(&mut page, 0, record1);
 
-        let record2 = "bbbbb".as_bytes();
-        insert_vararray_entry(&mut page, 0, &record2);
+        let record2 = b"bbbbb";
+        insert_vararray_entry(&mut page, 0, record2);
 
         assert_eq!(record2, get_vararray_entry(&page, 0));
         assert_eq!(record1, get_vararray_entry(&page, 1));
@@ -271,14 +271,14 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
-        let record0 = "aaaa".as_bytes();
-        insert_vararray_entry(&mut page, 0, &record0);
+        let record0 = b"aaaa";
+        insert_vararray_entry(&mut page, 0, record0);
 
-        let record1 = "bbbbb".as_bytes();
-        insert_vararray_entry(&mut page, 0, &record1);
+        let record1 = b"bbbbb";
+        insert_vararray_entry(&mut page, 0, record1);
 
-        let record2 = "ccc".as_bytes();
-        insert_vararray_entry(&mut page, 1, &record2);
+        let record2 = b"ccc";
+        insert_vararray_entry(&mut page, 1, record2);
 
         assert_eq!(record1, get_vararray_entry(&page, 0));
         assert_eq!(record2, get_vararray_entry(&page, 1));
@@ -292,14 +292,14 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
-        let record1 = "aaaa".as_bytes();
+        let record1 = b"aaaa";
         let init_free_space = get_vararray_free_space(&page);
-        insert_vararray_entry(&mut page, 0, &record1);
+        insert_vararray_entry(&mut page, 0, record1);
         assert_eq!(get_vararray_free_space(&page), init_free_space - record1.len() - OFFSETS_ENTRY_SIZE);
 
-        let record2 = "abcdefghijklmnopqrstuvwxyz".as_bytes();
+        let record2 = b"abcdefghijklmnopqrstuvwxyz";
         let init_free_space = get_vararray_free_space(&page);
-        insert_vararray_entry(&mut page, 1, &record2);
+        insert_vararray_entry(&mut page, 1, record2);
         assert_eq!(get_vararray_free_space(&page), init_free_space - record2.len() - OFFSETS_ENTRY_SIZE);
 
         sanity_check_record_array(&page);
@@ -311,14 +311,14 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
-        let record1 = "aaaa".as_bytes();
-        insert_vararray_entry(&mut page, 0, &record1);
+        let record1 = b"aaaa";
+        insert_vararray_entry(&mut page, 0, record1);
 
-        let record2 = "bbbbb".as_bytes();
-        insert_vararray_entry(&mut page, 1, &record2);
+        let record2 = b"bbbbb";
+        insert_vararray_entry(&mut page, 1, record2);
 
-        let record3 = "ccc".as_bytes();
-        insert_vararray_entry(&mut page, 3, &record3);
+        let record3 = b"ccc";
+        insert_vararray_entry(&mut page, 3, record3);
 
         sanity_check_record_array(&page);
     }
@@ -330,7 +330,7 @@ mod tests {
         init_vararray(&mut page);
 
         for _ in 0..1024 {
-            insert_vararray_entry(&mut page, 0, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".as_bytes());
+            insert_vararray_entry(&mut page, 0, b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         }
     }
 
@@ -339,19 +339,19 @@ mod tests {
         // note entries are out of order
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
-        insert_vararray_entry(&mut page, 0, "apple".as_bytes());
-        insert_vararray_entry(&mut page, 0, "aardvark".as_bytes());
-        insert_vararray_entry(&mut page, 2, "banana".as_bytes());
-        insert_vararray_entry(&mut page, 3, "zebra".as_bytes());
+        insert_vararray_entry(&mut page, 0, b"apple");
+        insert_vararray_entry(&mut page, 0, b"aardvark");
+        insert_vararray_entry(&mut page, 2, b"banana");
+        insert_vararray_entry(&mut page, 3, b"zebra");
 
         // Remove first entry (aardvark)
         delete_vararray_entry(&mut page, 0);
         assert_eq!(get_num_vararray_entries(&page), 3);
         sanity_check_record_array(&page);
 
-        assert_eq!(get_vararray_entry(&page, 0), "apple".as_bytes());
-        assert_eq!(get_vararray_entry(&page, 1), "banana".as_bytes());
-        assert_eq!(get_vararray_entry(&page, 2), "zebra".as_bytes());
+        assert_eq!(get_vararray_entry(&page, 0), b"apple");
+        assert_eq!(get_vararray_entry(&page, 1), b"banana");
+        assert_eq!(get_vararray_entry(&page, 2), b"zebra");
     }
 
     #[test]
@@ -359,19 +359,19 @@ mod tests {
         // note entries are out of order
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
-        insert_vararray_entry(&mut page, 0, "apple".as_bytes());
-        insert_vararray_entry(&mut page, 0, "aardvark".as_bytes());
-        insert_vararray_entry(&mut page, 2, "banana".as_bytes());
-        insert_vararray_entry(&mut page, 3, "zebra".as_bytes());
+        insert_vararray_entry(&mut page, 0, b"apple");
+        insert_vararray_entry(&mut page, 0, b"aardvark");
+        insert_vararray_entry(&mut page, 2, b"banana");
+        insert_vararray_entry(&mut page, 3, b"zebra");
 
         // Remove from middle (apple)
         delete_vararray_entry(&mut page, 1);
         assert_eq!(get_num_vararray_entries(&page), 3);
         sanity_check_record_array(&page);
 
-        assert_eq!(get_vararray_entry(&page, 0), "aardvark".as_bytes());
-        assert_eq!(get_vararray_entry(&page, 1), "banana".as_bytes());
-        assert_eq!(get_vararray_entry(&page, 2), "zebra".as_bytes());
+        assert_eq!(get_vararray_entry(&page, 0), b"aardvark");
+        assert_eq!(get_vararray_entry(&page, 1), b"banana");
+        assert_eq!(get_vararray_entry(&page, 2), b"zebra");
     }
 
     #[test]
@@ -380,19 +380,19 @@ mod tests {
         // note entries are out of order
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
-        insert_vararray_entry(&mut page, 0, "apple".as_bytes());
-        insert_vararray_entry(&mut page, 0, "aardvark".as_bytes());
-        insert_vararray_entry(&mut page, 2, "banana".as_bytes());
-        insert_vararray_entry(&mut page, 3, "zebra".as_bytes());
+        insert_vararray_entry(&mut page, 0, b"apple");
+        insert_vararray_entry(&mut page, 0, b"aardvark");
+        insert_vararray_entry(&mut page, 2, b"banana");
+        insert_vararray_entry(&mut page, 3, b"zebra");
 
         // Remove last entry (zebra)
         delete_vararray_entry(&mut page, 3);
         assert_eq!(get_num_vararray_entries(&page), 3);
         sanity_check_record_array(&page);
 
-        assert_eq!(get_vararray_entry(&page, 0), "aardvark".as_bytes());
-        assert_eq!(get_vararray_entry(&page, 1), "apple".as_bytes());
-        assert_eq!(get_vararray_entry(&page, 2), "banana".as_bytes());
+        assert_eq!(get_vararray_entry(&page, 0), b"aardvark");
+        assert_eq!(get_vararray_entry(&page, 1), b"apple");
+        assert_eq!(get_vararray_entry(&page, 2), b"banana");
     }
 
     #[test]
@@ -401,8 +401,8 @@ mod tests {
         init_vararray(&mut page);
         let capacity = get_vararray_free_space(&page);
 
-        insert_vararray_entry(&mut page, 0, "apple".as_bytes());
-        insert_vararray_entry(&mut page, 1, "aardvark".as_bytes());
+        insert_vararray_entry(&mut page, 0, b"apple");
+        insert_vararray_entry(&mut page, 1, b"aardvark");
 
         delete_vararray_entry(&mut page, 0);
         delete_vararray_entry(&mut page, 0);
@@ -417,7 +417,7 @@ mod tests {
     fn test_delete_bad_index() {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
-        insert_vararray_entry(&mut page, 0, "aardvark".as_bytes());
+        insert_vararray_entry(&mut page, 0, b"aardvark");
         delete_vararray_entry(&mut page, 1);
     }
 
@@ -426,7 +426,7 @@ mod tests {
     fn test_get_record_out_of_range() {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
-        insert_vararray_entry(&mut page, 0, "aardvark".as_bytes());
+        insert_vararray_entry(&mut page, 0, b"aardvark");
         get_vararray_entry(&mut page, 1);
     }
 
