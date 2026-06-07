@@ -61,6 +61,7 @@ pub fn get_vararray_free_space(page: &PageData) -> usize {
 pub fn insert_vararray_entry(page: &mut PageData, index: usize, value: &[u8]) {
     assert!(get_vararray_free_space(page) >= value.len() + OFFSETS_ENTRY_SIZE,
         "Insufficient space to insert");
+    assert!(!value.is_empty(), "Attempt to insert empty entry");
 
     let num_entries = get_num_vararray_entries(page);
     assert!(index <= num_entries, "Insert index out of range");
@@ -121,7 +122,7 @@ pub fn delete_vararray_entry(page: &mut PageData, index: usize) {
 
 pub fn get_vararray_entry(page: &PageData, index: usize) -> &[u8] {
     assert!(index < get_num_vararray_entries(page),
-        "Record index out of range");
+        "Entry index out of range");
 
     let offset = get_u16(page, OFFSETS_LOC + index
         * OFFSETS_ENTRY_SIZE) as usize;
@@ -137,7 +138,7 @@ mod tests {
     use rand::{SeedableRng, RngExt};
     use super::*;
 
-    fn sanity_check_record_array(page: &PageData) {
+    fn sanity_check_vararray(page: &PageData) {
         let mut sorted_rec_offs: Vec<(usize, usize)> = Vec::new();
 
         // Walk through the entries, put offss into a list.
@@ -152,7 +153,7 @@ mod tests {
         for i in 0..num_entries {
             let entry_offs = get_u16(page, OFFSETS_LOC + i * OFFSETS_ENTRY_SIZE) as usize;
             let entry_len = get_u16(page, OFFSETS_LOC + i * OFFSETS_ENTRY_SIZE + 2) as usize;
-            assert_lt!(entry_offs, PAGE_SIZE, "Record offset out of range");
+            assert_lt!(entry_offs, PAGE_SIZE, "Entry offset out of range");
             sorted_rec_offs.push((entry_offs, entry_len));
         }
 
@@ -162,7 +163,7 @@ mod tests {
 
         // Ensure first offs in header is correct
         assert_eq!(sorted_rec_offs[0].0, data_start_offs,
-            "First record offset is incorrect");
+            "First entry offset is incorrect");
 
         // Now ensure the entry are packed end-to-end, the lengths are in
         // the page.
@@ -173,7 +174,7 @@ mod tests {
             assert_le!(last_entry_end, PAGE_SIZE, "Entry length out of bounds"); // Ensure it doesn't spill off page
         }
 
-        assert_eq!(last_entry_end, PAGE_SIZE, "Gap at end of records");
+        assert_eq!(last_entry_end, PAGE_SIZE, "Gap at end of entries");
     }
 
     // Validate the sanity_check routine
@@ -185,12 +186,12 @@ mod tests {
 
         page[DATA_START_FIELD_OFFS] += 1; // Adjust start of data field
 
-        sanity_check_record_array(&page);
+        sanity_check_vararray(&page);
     }
 
     // Validate the sanity_check routine
     #[test]
-    #[should_panic = "Record offset out of range"]
+    #[should_panic = "Entry offset out of range"]
     fn test_sanity_check_offset_out_of_range() {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
@@ -199,13 +200,13 @@ mod tests {
         insert_vararray_entry(&mut page, 1, b"bbbbb");
         set_u16(&mut page, OFFSETS_LOC + OFFSETS_ENTRY_SIZE, PAGE_SIZE as u16 + 1);
 
-        sanity_check_record_array(&page);
+        sanity_check_vararray(&page);
     }
 
     // Validate the sanity_check routine
     #[test]
-    #[should_panic = "First record offset is incorrect"]
-    fn test_sanity_incorrect_record_offset() {
+    #[should_panic = "First entry offset is incorrect"]
+    fn test_sanity_incorrect_entry_offset() {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
@@ -214,7 +215,7 @@ mod tests {
 
         page[DATA_START_FIELD_OFFS] += 1; // Adjust start of data field
 
-        sanity_check_record_array(&page);
+        sanity_check_vararray(&page);
     }
 
     // Validate the sanity_check routine
@@ -229,7 +230,7 @@ mod tests {
 
         page[OFFSETS_LOC + OFFSETS_ENTRY_SIZE + 2] += 1; // Increase the length by one byte
 
-        sanity_check_record_array(&page);
+        sanity_check_vararray(&page);
     }
 
     #[test]
@@ -237,16 +238,16 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
-        let record1 = b"aaaa";
-        insert_vararray_entry(&mut page, 0, record1);
+        let entry1 = b"aaaa";
+        insert_vararray_entry(&mut page, 0, entry1);
 
-        let record2 = b"bbbbb";
-        insert_vararray_entry(&mut page, 1, record2);
+        let entry2 = b"bbbbb";
+        insert_vararray_entry(&mut page, 1, entry2);
 
-        assert_eq!(record1, get_vararray_entry(&page, 0));
-        assert_eq!(record2, get_vararray_entry(&page, 1));
+        assert_eq!(entry1, get_vararray_entry(&page, 0));
+        assert_eq!(entry2, get_vararray_entry(&page, 1));
 
-        sanity_check_record_array(&page);
+        sanity_check_vararray(&page);
     }
 
     #[test]
@@ -254,16 +255,16 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
-        let record1 = b"aaaa";
-        insert_vararray_entry(&mut page, 0, record1);
+        let entry1 = b"aaaa";
+        insert_vararray_entry(&mut page, 0, entry1);
 
-        let record2 = b"bbbbb";
-        insert_vararray_entry(&mut page, 0, record2);
+        let entry2 = b"bbbbb";
+        insert_vararray_entry(&mut page, 0, entry2);
 
-        assert_eq!(record2, get_vararray_entry(&page, 0));
-        assert_eq!(record1, get_vararray_entry(&page, 1));
+        assert_eq!(entry2, get_vararray_entry(&page, 0));
+        assert_eq!(entry1, get_vararray_entry(&page, 1));
 
-        sanity_check_record_array(&page);
+        sanity_check_vararray(&page);
     }
 
     #[test]
@@ -271,20 +272,20 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
-        let record0 = b"aaaa";
-        insert_vararray_entry(&mut page, 0, record0);
+        let entry0 = b"aaaa";
+        insert_vararray_entry(&mut page, 0, entry0);
 
-        let record1 = b"bbbbb";
-        insert_vararray_entry(&mut page, 0, record1);
+        let entry1 = b"bbbbb";
+        insert_vararray_entry(&mut page, 0, entry1);
 
-        let record2 = b"ccc";
-        insert_vararray_entry(&mut page, 1, record2);
+        let entry2 = b"ccc";
+        insert_vararray_entry(&mut page, 1, entry2);
 
-        assert_eq!(record1, get_vararray_entry(&page, 0));
-        assert_eq!(record2, get_vararray_entry(&page, 1));
-        assert_eq!(record0, get_vararray_entry(&page, 2));
+        assert_eq!(entry1, get_vararray_entry(&page, 0));
+        assert_eq!(entry2, get_vararray_entry(&page, 1));
+        assert_eq!(entry0, get_vararray_entry(&page, 2));
 
-        sanity_check_record_array(&page);
+        sanity_check_vararray(&page);
     }
 
     #[test]
@@ -292,17 +293,17 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
-        let record1 = b"aaaa";
+        let entry1 = b"aaaa";
         let init_free_space = get_vararray_free_space(&page);
-        insert_vararray_entry(&mut page, 0, record1);
-        assert_eq!(get_vararray_free_space(&page), init_free_space - record1.len() - OFFSETS_ENTRY_SIZE);
+        insert_vararray_entry(&mut page, 0, entry1);
+        assert_eq!(get_vararray_free_space(&page), init_free_space - entry1.len() - OFFSETS_ENTRY_SIZE);
 
-        let record2 = b"abcdefghijklmnopqrstuvwxyz";
+        let entry2 = b"abcdefghijklmnopqrstuvwxyz";
         let init_free_space = get_vararray_free_space(&page);
-        insert_vararray_entry(&mut page, 1, record2);
-        assert_eq!(get_vararray_free_space(&page), init_free_space - record2.len() - OFFSETS_ENTRY_SIZE);
+        insert_vararray_entry(&mut page, 1, entry2);
+        assert_eq!(get_vararray_free_space(&page), init_free_space - entry2.len() - OFFSETS_ENTRY_SIZE);
 
-        sanity_check_record_array(&page);
+        sanity_check_vararray(&page);
     }
 
     #[test]
@@ -311,16 +312,16 @@ mod tests {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
-        let record1 = b"aaaa";
-        insert_vararray_entry(&mut page, 0, record1);
+        let entry1 = b"aaaa";
+        insert_vararray_entry(&mut page, 0, entry1);
 
-        let record2 = b"bbbbb";
-        insert_vararray_entry(&mut page, 1, record2);
+        let entry2 = b"bbbbb";
+        insert_vararray_entry(&mut page, 1, entry2);
 
-        let record3 = b"ccc";
-        insert_vararray_entry(&mut page, 3, record3);
+        let entry3 = b"ccc";
+        insert_vararray_entry(&mut page, 3, entry3);
 
-        sanity_check_record_array(&page);
+        sanity_check_vararray(&page);
     }
 
     #[test]
@@ -347,7 +348,7 @@ mod tests {
         // Remove first entry (aardvark)
         delete_vararray_entry(&mut page, 0);
         assert_eq!(get_num_vararray_entries(&page), 3);
-        sanity_check_record_array(&page);
+        sanity_check_vararray(&page);
 
         assert_eq!(get_vararray_entry(&page, 0), b"apple");
         assert_eq!(get_vararray_entry(&page, 1), b"banana");
@@ -367,7 +368,7 @@ mod tests {
         // Remove from middle (apple)
         delete_vararray_entry(&mut page, 1);
         assert_eq!(get_num_vararray_entries(&page), 3);
-        sanity_check_record_array(&page);
+        sanity_check_vararray(&page);
 
         assert_eq!(get_vararray_entry(&page, 0), b"aardvark");
         assert_eq!(get_vararray_entry(&page, 1), b"banana");
@@ -388,7 +389,7 @@ mod tests {
         // Remove last entry (zebra)
         delete_vararray_entry(&mut page, 3);
         assert_eq!(get_num_vararray_entries(&page), 3);
-        sanity_check_record_array(&page);
+        sanity_check_vararray(&page);
 
         assert_eq!(get_vararray_entry(&page, 0), b"aardvark");
         assert_eq!(get_vararray_entry(&page, 1), b"apple");
@@ -407,7 +408,7 @@ mod tests {
         delete_vararray_entry(&mut page, 0);
         delete_vararray_entry(&mut page, 0);
         assert_eq!(get_num_vararray_entries(&page), 0);
-        sanity_check_record_array(&page);
+        sanity_check_vararray(&page);
 
         assert_eq!(capacity, get_vararray_free_space(&page));
     }
@@ -422,21 +423,24 @@ mod tests {
     }
 
     #[test]
-    #[should_panic = "Record index out of range"]
-    fn test_get_record_out_of_range() {
+    #[should_panic = "Entry index out of range"]
+    fn test_get_entry_out_of_range() {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
         insert_vararray_entry(&mut page, 0, b"aardvark");
         get_vararray_entry(&mut page, 1);
     }
 
-    fn random_value(rng: &mut impl RngExt) -> Vec<u8> {
-        let len = rng.random_range(1..256);
-        (0..len).map(|_| rng.random()).collect()
+    #[test]
+    #[should_panic = "Attempt to insert empty entry"]
+    fn test_zero_len_entry() {
+        let mut page: PageData = [0; PAGE_SIZE];
+        init_vararray(&mut page);
+        insert_vararray_entry(&mut page, 0, &[]);
     }
 
     #[test]
-    fn test_record_array_stress() {
+    fn test_vararray_stress() {
         let seed: u64 = 0x12345;
         let mut rng = SmallRng::seed_from_u64(seed);
         let mut oracle: Vec<Vec<u8>> = Vec::new();
@@ -445,26 +449,24 @@ mod tests {
 
         init_vararray(&mut page);
         for rep in 0..10000 {
-            if rng.random::<f64>() > 0.5 || rep < 20 {
-                // Insert entry
-                let record = random_value(&mut rng);
-                let space_needed = record.len() + 4;
-                let slot = rng.random_range(0..oracle.len() + 1);
-                if space_needed <= space_available {
-                    insert_vararray_entry(&mut page, slot, &record);
-                    oracle.insert(slot, record.clone());
-                    space_available -= space_needed;
-                }
-            } else if oracle.len() > 0 {
+            if (oracle.len() > 0 && rng.random_bool(0.5) && rep > 20) || space_available < 6 {
                 // Delete entry
                 let slot = rng.random_range(0..oracle.len());
                 delete_vararray_entry(&mut page, slot);
                 space_available += oracle[slot].len() + 4;
                 oracle.remove(slot);
+             } else {
+                // Insert entry
+                let len = rng.random_range(1..space_available - 4);
+                let entry: Vec<u8> = (0..len).map(|_| rng.random()).collect();
+                let slot = rng.random_range(0..oracle.len() + 1);
+                insert_vararray_entry(&mut page, slot, &entry);
+                oracle.insert(slot, entry.clone());
+                space_available -= len + 4;
             }
 
             // Validate
-            sanity_check_record_array(&page);
+            sanity_check_vararray(&page);
             for i in 0..oracle.len() {
                 assert_eq!(get_vararray_entry(&page, i), &oracle[i]);
             }
