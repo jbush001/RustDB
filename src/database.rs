@@ -83,7 +83,6 @@ impl Database {
 
         let new_collection = Collection::create(name, &self.page_cache, &mut self.page_allocator);
         let metadata = &new_collection.get_metadata();
-        println!("{:?}", metadata);
         let id = self.meta_collection.insert(metadata, &self.page_cache,
             &mut self.page_allocator);
         self.collections.insert(name.to_string(),
@@ -142,11 +141,8 @@ mod tests {
         {
             let mut db = Database::create(mock_io.clone());
             let _transaction = db.begin_transaction();
-            println!("create collection");
             assert!(db.create_collection("people").is_ok());
-            println!("create index");
             db.create_index("people", "name").unwrap();
-            println!("insert records");
             db.insert_document("people", json!({"name": "Alice", "age": 30})).unwrap();
             db.insert_document("people", json!({"name": "Bob", "age": 25})).unwrap();
             db.insert_document("people", json!({"name": "Charlie", "age": 35})).unwrap();

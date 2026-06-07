@@ -444,7 +444,7 @@ mod tests {
         let mut space_available: usize = 4000; // Rounded down a bit
 
         init_vararray(&mut page);
-        for rep in 0..500 {
+        for rep in 0..10000 {
             if rng.random::<f64>() > 0.5 || rep < 20 {
                 // Insert entry
                 let record = random_value(&mut rng);

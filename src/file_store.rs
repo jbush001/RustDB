@@ -85,34 +85,46 @@ mod tests {
         let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
         let mut temp1: PageData = [0; PAGE_SIZE];
-        let test_string1 = "abcdefghiklmnopqrstuvwxyz0123456789";
+        let test_string1 = "abcdefghiklmnopqrstuvwxyz0123456789-";
         for (dest, src) in temp1.iter_mut().zip(test_string1.bytes().cycle()) {
             *dest = src;
         }
 
+        let mut temp2: PageData = [0; PAGE_SIZE];
+        let test_string2 = "zqwertyuiopasdffhkgklfkgjf9876543210!";
+        for (dest, src) in temp2.iter_mut().zip(test_string2.bytes().cycle()) {
+            *dest = src;
+        }
+
+        // Write out of order to ensure seek works correctly
+        store.write(FilePageId(1), &temp2);
         store.write(FilePageId(0), &temp1);
 
         let bytes = fs::read(file.path().to_str().unwrap()).unwrap();
-        assert_eq!(bytes, temp1);
+        assert_eq!(bytes[..PAGE_SIZE], temp1);
+        assert_eq!(bytes[PAGE_SIZE..], temp2);
     }
 
     #[test]
     fn test_read() {
         let file = NamedTempFile::new().unwrap();
-        let mut temp1: PageData = [0; PAGE_SIZE];
-        let test_string1 = "abcdefghiklmnopqrstuvwxyz0123456789";
-        for (dest, src) in temp1.iter_mut().zip(test_string1.bytes().cycle()) {
+        let mut source_buf: [u8; _] = [0; PAGE_SIZE * 2];
+        let test_string1 = "abcdefghiklmnopqrstuvwxyz0123456789-";
+        for (dest, src) in source_buf.iter_mut().zip(test_string1.bytes().cycle()) {
             *dest = src;
         }
 
-        fs::write(file.path().to_str().unwrap(), &temp1).expect("write failed");
+        fs::write(file.path().to_str().unwrap(), &source_buf).expect("write failed");
 
         let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
         let mut temp2: PageData = [0; PAGE_SIZE];
-        store.read(FilePageId(0), &mut temp2);
+        store.read(FilePageId(1), &mut temp2);
+        let mut temp1: PageData = [0; PAGE_SIZE];
+        store.read(FilePageId(0), &mut temp1);
 
-        assert_eq!(temp1, temp2);
+        assert_eq!(temp1, source_buf[..PAGE_SIZE]);
+        assert_eq!(temp2, source_buf[PAGE_SIZE..]);
     }
 
     #[test]
