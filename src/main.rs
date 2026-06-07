@@ -16,26 +16,24 @@
 
 mod btree;
 mod collection;
+mod database;
 mod file_store;
-#[cfg(test)] mod mocks;
 mod page_allocator;
 mod page_cache;
 mod query;
 mod superblock;
 mod util;
 mod vararray;
+#[cfg(test)] mod mocks;
 
-use crate::file_store::{FileStore};
-use crate::page_allocator::*;
-use crate::page_cache::*;
+use crate::database::Database;
+use crate::file_store::FileStore;
+use crate::page_cache::PersistentStore;
 use std::cell::RefCell;
 use std::rc::Rc;
 
 fn main() {
     // TODO need to check if main.db exists, create if if not
     let file_store: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(FileStore::open("main.db").unwrap()));
-    let page_cache = PageCache::new(1000, Rc::clone(&file_store));
-    let mut allocator = PageAllocator::new(&page_cache);
-
-    allocator.alloc();
+    let _db = Database::create(file_store);
 }

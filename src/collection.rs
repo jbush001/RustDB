@@ -44,6 +44,7 @@ struct Index {
 }
 
 pub struct Collection {
+    name: String,
     next_docid: u64,
     document_tree: BTree,
     indices: Vec<Index>
@@ -62,6 +63,7 @@ impl Collection {
         }
 
         Collection {
+            name: metadata["name"].to_string(),
             next_docid: 1,
             document_tree: BTree::open(FilePageId(metadata["root_page_fpid"].as_u64()
                 .expect("root_page_fpid is not an integer"))),
@@ -69,8 +71,9 @@ impl Collection {
         }
     }
 
-    pub fn create(page_cache: &PageCache,page_allocator: &mut PageAllocator) -> Self {
+    pub fn create(name: &str, page_cache: &PageCache,page_allocator: &mut PageAllocator) -> Self {
         Collection {
+            name: name.to_string(),
             next_docid: 1,
             document_tree: BTree::create(page_cache, page_allocator),
             indices: Vec::new()
@@ -79,6 +82,7 @@ impl Collection {
 
     pub fn get_metadata(&self) -> Value {
         json!({
+            "name": self.name,
             "root_page_fpid": self.document_tree.get_root_page_id().0,
             "indices": self.indices.iter().map(|index| {
                 json!({
@@ -352,7 +356,7 @@ pub struct SequentialScan {
 }
 
 impl SequentialScan {
-    fn new(collection: &Collection, page_cache: &PageCache) -> Self {
+    pub fn new(collection: &Collection, page_cache: &PageCache) -> Self {
         Self {
             iterator: collection.document_tree.iterate(false, page_cache),
             page_cache: page_cache.clone()
@@ -545,11 +549,11 @@ pub fn lookup_field(path: &FieldPath, record: &Value) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::mocks::{MockPersistentStore};
+    use crate::mocks::MockPersistentStore;
     use crate::page_cache::*;
     use crate::superblock::*;
-    use rand::rngs::{SmallRng};
-    use rand::{SeedableRng};
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng;
     use rand::seq::SliceRandom;
     use serde_json::{Value, json, Number};
     use std::cell::RefCell;
@@ -573,7 +577,7 @@ mod tests {
         }
 
         let mut allocator = PageAllocator::new(&mut page_cache);
-        let collection = Collection::create(&page_cache, &mut allocator);
+        let collection = Collection::create("stuff", &page_cache, &mut allocator);
 
         (page_cache, allocator, collection)
     }
