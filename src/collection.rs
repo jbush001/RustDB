@@ -336,6 +336,10 @@ pub fn encode_key(key: &Value, docid: DocId) -> Result<Vec<u8>, String> {
             }
         },
         Value::String(s) => {
+            if s.len() > MAX_RECORD_SIZE - 16 {
+                return Err("Key is too large".to_string());
+            }
+
             let mut v = vec![TAG_STRING];
             v.extend_from_slice(s.as_bytes());
             v
@@ -658,9 +662,14 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_key_invalid() {
+    fn test_encode_key_bad_type() {
         assert_eq!(encode_key(&json!({"foo": "bar"}), DocId(0)), Err("Unindexable field type".to_string()));
         assert_eq!(encode_key(&json!([1,2,3,4,5]), DocId(0)), Err("Unindexable field type".to_string()));
+    }
+
+    #[test]
+    fn test_encode_key_too_large() {
+        assert_eq!(encode_key(&json!("x".repeat(0x4000)), DocId(0)), Err("Key is too large".to_string()));
     }
 
     #[test]
@@ -1228,5 +1237,29 @@ mod tests {
         }
 
         SequentialScan::new(&collection, &page_cache).next();
+    }
+
+    // Key lengths are limited in this implementation. Ensure if we try to add a very
+    // large key it ignores it rather than doing something bad.
+    #[test]
+    fn test_index_large_field() {
+        let (mut page_cache, mut allocator, mut collection) = create_collection();
+
+        let transaction = page_cache.begin_transaction();
+        collection.create_index(&FieldPath::new("image_data").unwrap(), &mut page_cache, &mut allocator);
+
+        let doc1 = json!({"image_data": "abcd"});
+        let docid1 = collection.insert(&doc1, &mut page_cache, &mut allocator);
+
+        let doc2 = json!({"image_data": "x".repeat(0x4000)});
+        let _docid2 = collection.insert(&doc2, &mut page_cache, &mut allocator);
+
+        drop(transaction);
+
+        let collection_ref: Rc<RefCell<Collection>> = Rc::new(RefCell::new(collection));
+        let mut iter = IndexScan::new(collection_ref.clone(), 0, None, None, false, &page_cache)
+            .expect("failed to open cursor");
+        assert_eq!(iter.next(), Some((docid1, doc1)));
+        assert!(iter.next().is_none());
     }
 }
