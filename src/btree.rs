@@ -502,6 +502,7 @@ mod tests {
     use more_asserts::{assert_le, assert_lt};
     use rand::rngs::{SmallRng};
     use rand::{SeedableRng, RngExt};
+    use rand::seq::SliceRandom;
     use std::cell::RefCell;
     use std::cmp::{Ord};
     use std::rc::Rc;
@@ -740,20 +741,6 @@ mod tests {
         assert!(!is_leaf(&page));
     }
 
-    // Helper function to create a shuffled list of indices. Each index
-    // is only present once.
-    fn prand_order(n: usize) -> Vec<usize> {
-        let seed = 0xc0fc47a65d406179;
-        let mut rng = SmallRng::seed_from_u64(seed);
-        let mut result: Vec<usize> = (0..n).collect();
-        for i in (1..n).rev() {
-            let j = rng.random_range(0..n);
-            result.swap(i, j);
-        }
-
-        result
-    }
-
     fn gen_key_for_index(index: usize) -> Vec<u8> {
         let mut key = index.to_be_bytes().to_vec();
         key.extend_from_slice(&[0u8].repeat(32));
@@ -782,7 +769,10 @@ mod tests {
     fn populate_test_btree() -> (PageCache, PageAllocator, BTree) {
         let (page_cache, mut allocator, tree) = create_test_btree();
         let _transaction = page_cache.begin_transaction();
-        for i in prand_order(NUM_TEST_ENTRIES) {
+
+        let mut test_sequence: Vec<usize> = (0..NUM_TEST_ENTRIES).collect();
+        test_sequence.shuffle(&mut SmallRng::seed_from_u64(0xc0fc47a65d406179));
+        for i in test_sequence {
             tree.insert(&gen_key_for_index(i), &(i as u64).to_le_bytes(), &page_cache, &mut allocator);
         }
 
