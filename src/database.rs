@@ -78,7 +78,7 @@ impl Database {
 
     pub fn create_collection(&mut self, name: &str) -> Result<DocId, String> {
         if self.collections.contains_key(name) {
-            return Err("collection already exists".to_string());
+            return Err("Collection already exists".to_string());
         }
 
         let new_collection = Collection::create(name, &self.page_cache, &mut self.page_allocator);
@@ -93,7 +93,7 @@ impl Database {
 
     pub fn create_index(&mut self, collection_name: &str, field_name: &str) -> Result<(), String> {
         let (collection_id, collection) = self.collections.get(collection_name)
-            .ok_or("collection not found".to_string())?;
+            .ok_or("Collection not found".to_string())?;
 
         let mut collection = collection.borrow_mut();
         collection.create_index(&FieldPath::new(field_name)?, &self.page_cache,
@@ -109,7 +109,7 @@ impl Database {
 
     pub fn insert_document(&mut self, collection_name: &str, document: Value) -> Result<DocId, String> {
         let (_collection_id, collection) = self.collections.get(collection_name)
-            .ok_or("collection not found".to_string())?;
+            .ok_or("Collection not found".to_string())?;
 
         let mut collection = collection.borrow_mut();
         let docid = collection.insert(&document, &self.page_cache, &mut self.page_allocator);
@@ -123,7 +123,7 @@ impl Database {
 
     pub fn query(&self, collection_name: &str) -> Result<impl Iterator<Item = (DocId, Value)>, String> {
         let (_collection_id, collection) = self.collections.get(collection_name)
-            .ok_or("collection not found".to_string())?;
+            .ok_or("Collection not found".to_string())?;
         Ok(SequentialScan::new(&collection.borrow(), &self.page_cache))
     }
 }
@@ -157,5 +157,40 @@ mod tests {
         assert_eq!(iter.next(), Some((DocId(2), json!({"name": "Bob", "age": 25}))));
         assert_eq!(iter.next(), Some((DocId(3), json!({"name": "Charlie", "age": 35}))));
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_create_collection_existing() {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
+        let mut db = Database::create(mock_io.clone());
+        let _transaction = db.begin_transaction();
+        assert!(db.create_collection("people").is_ok());
+        assert_eq!(db.create_collection("people"), Err("Collection already exists".to_string()));
+    }
+
+    #[test]
+    fn test_create_index_bad_collection() {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
+        let mut db = Database::create(mock_io.clone());
+        let _transaction = db.begin_transaction();
+        assert_eq!(db.create_index("orders", "invoice_num"), Err("Collection not found".to_string()));
+    }
+
+    #[test]
+    fn test_insert_doc_bad_collection() {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(
+            MockPersistentStore::default()));
+        let mut db = Database::create(mock_io.clone());
+        let _transaction = db.begin_transaction();
+        assert_eq!(db.insert_document("employees", json!({"name": "Alice", "age": 30})),
+            Err("Collection not found".to_string()));
+    }
+
+    #[test]
+    fn test_query_bad_collection() {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(
+            MockPersistentStore::default()));
+        let db = Database::create(mock_io.clone());
+        assert!(db.query("employees").is_err());
     }
 }

@@ -560,6 +560,25 @@ mod tests {
         });
     }
 
+    #[test]
+    #[should_panic="assertion failed: !self.transaction_active"]
+    fn test_multiple_transaction() {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> =
+            Rc::new(RefCell::new(MockPersistentStore::default()));
+        let page_cache = PageCache::new(10, Rc::clone(&mock_io));
+        let _transaction1 = page_cache.begin_transaction();
+        let _transaction2 = page_cache.begin_transaction();
+    }
+
+    #[test]
+    #[should_panic="assertion failed: !writable || self.transaction_active"]
+    fn test_op_outside_transaction() {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> =
+            Rc::new(RefCell::new(MockPersistentStore::default()));
+        let page_cache = PageCache::new(10, Rc::clone(&mock_io));
+        let _guard = page_cache.lock_page_mut(FilePageId(3));
+    }
+
     // Lock the same page twice for write in the same transaction
     // Regression test, this would hang previously because it would
     // reinsert the page into the dirty list, creating a loop.

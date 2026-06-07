@@ -159,6 +159,9 @@ impl Collection {
 
     pub fn create_index(&mut self, path: &FieldPath, page_cache: &PageCache,
         page_allocator: &mut PageAllocator) {
+
+        // TODO fail if index already exists
+
         let index = Index {
             field: path.clone(),
             btree: BTree::create(page_cache, page_allocator)
