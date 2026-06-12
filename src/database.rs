@@ -37,6 +37,8 @@ impl Database {
         let page_cache = PageCache::new(PAGE_CACHE_SIZE, Rc::clone(&file_store));
         let page_allocator = PageAllocator::new(&page_cache);
 
+        page_cache.replay();
+
         // A bit of a hack: we know the first page that will be allocated is just
         // after the journal, so hard code it here.
         let meta_collection = Collection::open(

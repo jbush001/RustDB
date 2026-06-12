@@ -155,6 +155,10 @@ impl PageCache {
             cache: Rc::clone(&self.inner)
         }
     }
+
+    pub fn replay(&self) {
+        self.inner.borrow_mut().write_ahead_log.replay();
+    }
 }
 
 struct PageCacheInner {
