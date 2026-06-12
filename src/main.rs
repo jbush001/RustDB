@@ -24,6 +24,7 @@ mod query;
 mod superblock;
 mod util;
 mod vararray;
+mod wal;
 #[cfg(test)] mod mocks;
 
 use crate::database::Database;

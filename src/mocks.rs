@@ -22,14 +22,24 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct MockPersistentStore {
-    saved_pages: HashMap<FilePageId, PageData>
+    saved_pages: HashMap<FilePageId, PageData>,
+    write_limit: usize
 }
 
 impl MockPersistentStore {
     pub fn default() -> Self {
         Self {
-            saved_pages: HashMap::new()
+            saved_pages: HashMap::new(),
+            write_limit: usize::MAX
         }
+    }
+
+    pub fn set_write_limit(&mut self, limit: usize) {
+        self.write_limit = limit;
+    }
+
+    pub fn hit_write_limit(&self) -> bool {
+        self.write_limit == 0
     }
 }
 
@@ -43,6 +53,14 @@ impl PersistentStore for MockPersistentStore {
     }
 
     fn write(&mut self, fpid: FilePageId, page: &PageData) {
+        if self.write_limit != usize::MAX && self.write_limit > 0 {
+            self.write_limit -= 1;
+        }
+
+        if self.write_limit == 0 {
+            return;
+        }
+
         self.saved_pages.insert(fpid, *page);
     }
 

@@ -16,7 +16,7 @@
 
 use crate::collection::*;
 use crate::page_allocator::PageAllocator;
-use crate::page_cache::{PageCache, PersistentStore, TransactionGuard};
+use crate::page_cache::{PageCache, PersistentStore, TransactionGuard, LOG_PAGES};
 use crate::superblock::*;
 use serde_json::{json, Value};
 use std::cell::RefCell;
@@ -37,8 +37,10 @@ impl Database {
         let page_cache = PageCache::new(PAGE_CACHE_SIZE, Rc::clone(&file_store));
         let page_allocator = PageAllocator::new(&page_cache);
 
+        // A bit of a hack: we know the first page that will be allocated is just
+        // after the journal, so hard code it here.
         let meta_collection = Collection::open(
-            &json!({"indices": [], "root_page_fpid": 1, "name": "_meta"}));
+            &json!({"indices": [], "root_page_fpid": LOG_PAGES + 1, "name": "_meta"}));
         let mut collections = HashMap::new();
         let iter = SequentialScan::new(&meta_collection, &page_cache);
         for (docid, document) in iter {

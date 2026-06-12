@@ -38,7 +38,7 @@ pub fn init_superblock(page: &mut PageData) {
     let block = get_superblock_mut(page);
     block.magic.copy_from_slice(SUPERBLOCK_MAGIC);
     block.free_list_head = 0;
-    block.file_size = 1;
+    block.file_size = LOG_PAGES as u64 + 1;
 }
 
 pub fn check_superblock(page: &PageData) -> Result<(), String> {

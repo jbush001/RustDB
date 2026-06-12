@@ -167,6 +167,21 @@ pub fn to_hex_string(bytes: &[u8], mut max_len: usize) -> String {
     result
 }
 
+// Koopman, Philip. "An Improved Modular Addition Checksum Algorithm."
+// arXiv preprint arXiv:2304.13496 (2023)
+pub fn checksum(bytes: &[u8]) -> u32 {
+    let mut sum: u64 = 1;
+    for b in bytes {
+        sum = ((sum << 8) + *b as u64) % 2147483629;
+    }
+
+    sum as u32
+}
+
+pub fn wrapping_gtr(a: u32, b: u32) -> bool {
+    a.wrapping_sub(b) as i32 > 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +423,21 @@ mod tests {
         let mut queue = IndexQueue::new(10);
         queue.push_head(0);
         queue.push_head(0);
+    }
+
+    #[test]
+    fn test_checksum() {
+        let data: &[u8; _] = b"abcdefghijklmnopqrstuvwxyz";
+        assert_eq!(checksum(data), 1777937181);
+    }
+
+    #[test]
+    fn test_wrapping_gtr() {
+        assert!(wrapping_gtr(0x80000001, 0x80000000));
+        assert!(wrapping_gtr(0x00000000, 0xffffffff));
+        assert!(wrapping_gtr(1, 0));
+        assert!(!wrapping_gtr(0x80000000, 0x80000001));
+        assert!(!wrapping_gtr(0xffffffff, 0x00000000));
+        assert!(!wrapping_gtr(0, 1));
     }
 }

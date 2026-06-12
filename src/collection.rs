@@ -1230,9 +1230,9 @@ mod tests {
         let doc = json!({"foo": large_value});
         let _docid = collection.insert(&doc, &mut page_cache, &mut allocator);
 
-        // XXX we know an overflow page will be 2
+        // XXX hack hard coded page address
         {
-            let mut page = page_cache.lock_page_mut(FilePageId(2));
+            let mut page = page_cache.lock_page_mut(FilePageId(LOG_PAGES as u64 + 2));
             page[0..8].fill(0); // Set to null
         }
 
