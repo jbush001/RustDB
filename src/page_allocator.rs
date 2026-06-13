@@ -23,8 +23,6 @@ use crate::page_cache::*;
 use crate::superblock::*;
 use crate::util::*;
 
-pub const NULL_FPID: FilePageId = FilePageId(0);
-
 pub struct PageAllocator {
     page_cache: PageCache,
     next_frontier: FilePageId,
@@ -47,7 +45,7 @@ impl PageAllocator {
     }
 
     pub fn alloc(&mut self) -> FilePageId {
-        if self.free_list_head != NULL_FPID {
+        if self.free_list_head != FilePageId::INVALID {
             let result = self.free_list_head;
             {
                 let page = self.page_cache.lock_page(self.free_list_head);

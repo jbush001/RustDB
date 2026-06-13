@@ -23,7 +23,7 @@
 // value: variable length
 // (value length is inferred based on record length)
 
-use crate::page_allocator::{PageAllocator, NULL_FPID};
+use crate::page_allocator::PageAllocator;
 use crate::page_cache::{PageCache, FilePageId, PageData, PAGE_SIZE};
 use crate::vararray::*;
 use crate::util::*;
@@ -49,7 +49,7 @@ impl Iterator for BTreeCursor {
     fn next(&mut self) -> Option<Self::Item> {
         // Check if we need to go to the next page or skip empty pages.
         let page = loop {
-            if self.current_node_fpid == NULL_FPID {
+            if self.current_node_fpid == FilePageId::INVALID {
                 return None
             }
 
@@ -61,7 +61,7 @@ impl Iterator for BTreeCursor {
                 }
 
                 self.current_node_fpid = get_prev_sib(&page);
-                if self.current_node_fpid != NULL_FPID {
+                if self.current_node_fpid != FilePageId::INVALID {
                     let page = self.page_cache.lock_page(self.current_node_fpid);
                     self.current_index = get_num_vararray_entries(&page) - 1;
                 }
@@ -147,7 +147,7 @@ impl BTree {
                 if (reverse && index == 0) || (!reverse && index == get_num_vararray_entries(&page)) {
                     // Nothing to fetch, return dummy cursor
                     return BTreeCursor {
-                        current_node_fpid: NULL_FPID,
+                        current_node_fpid: FilePageId::INVALID,
                         current_index: 0,
                         reverse,
                         page_cache: page_cache.clone()
@@ -193,7 +193,7 @@ impl BTree {
                     .expect("value was not 8 bytes")));
             }
 
-            assert!(current_node_fpid != NULL_FPID,
+            assert!(current_node_fpid != FilePageId::INVALID,
                 "Interior node has non-leaf children");
         };
 
@@ -312,8 +312,8 @@ impl BTree {
         while !fifo.is_empty() {
             let fpid = fifo.remove(0);
             let page = page_cache.lock_page(fpid);
-            println!("Node fpid {} is_leaf {} prev_sib {} next_sib {} right_child {}",
-                fpid.0, is_leaf(&page), get_prev_sib(&page).0, get_next_sib(&page).0, get_right_child(&page).0);
+            println!("Node fpid {:?} is_leaf {} prev_sib {} next_sib {} right_child {}",
+                fpid, is_leaf(&page), get_prev_sib(&page).0, get_next_sib(&page).0, get_right_child(&page).0);
 
             if is_leaf(&page) {
                 for i in 0..get_num_vararray_entries(&page) {
@@ -330,7 +330,7 @@ impl BTree {
                     fifo.push(FilePageId(child_fpid));
                 }
 
-                if get_right_child(&page) != NULL_FPID {
+                if get_right_child(&page) != FilePageId::INVALID {
                     fifo.push(get_right_child(&page));
                 }
             }
@@ -342,6 +342,8 @@ impl BTree {
 pub fn init_btree_node(page: &mut PageData) {
     init_vararray(page);
     page[0] = FLAG_LEAF;
+    set_u64(page, HEADER_NEXT_SIB_OFFS, FilePageId::INVALID.0);
+    set_u64(page, HEADER_PREV_SIB_OFFS, FilePageId::INVALID.0);
 }
 
 fn is_leaf(page: &PageData) -> bool {
@@ -357,7 +359,7 @@ fn get_next_sib(page: &PageData) -> FilePageId {
 }
 
 fn set_next_sib(page: &mut PageData, fpid: FilePageId) {
-    set_u64(&mut page[..], HEADER_NEXT_SIB_OFFS, fpid.0);
+    set_u64(&mut page[..], HEADER_NEXT_SIB_OFFS, fpid.into());
 }
 
 fn get_prev_sib(page: &PageData) -> FilePageId {
@@ -365,7 +367,7 @@ fn get_prev_sib(page: &PageData) -> FilePageId {
 }
 
 fn set_prev_sib(page: &mut PageData, fpid: FilePageId) {
-    set_u64(&mut page[..], HEADER_PREV_SIB_OFFS, fpid.0);
+    set_u64(&mut page[..], HEADER_PREV_SIB_OFFS, fpid.into());
 }
 
 fn get_right_child(page: &PageData) -> FilePageId {
@@ -373,7 +375,7 @@ fn get_right_child(page: &PageData) -> FilePageId {
 }
 
 fn set_right_child(page: &mut PageData, fpid: FilePageId) {
-    set_u64(&mut page[..], HEADER_RIGHT_CHILD_OFFS, fpid.0);
+    set_u64(&mut page[..], HEADER_RIGHT_CHILD_OFFS, fpid.into());
 }
 
 fn get_entry_size(key: &[u8], value: &[u8]) -> usize {

@@ -155,13 +155,13 @@ impl WriteAheadLog {
                     + HEADER_BLOCKS as u64 + cur as u64);
                 store.read(read_fpid, &mut block);
                 let write_fpid = FilePageId(get_u64(&self.header_data,
-                    LH_PAGE_HDRS_OFFS + cur as usize * PAGE_HEADER_SIZE + PH_FPID_OFFS));
+                    LH_PAGE_HDRS_OFFS + cur * PAGE_HEADER_SIZE + PH_FPID_OFFS));
                 store.write(write_fpid, &block);
 
                 if cur == self.num_log_blocks - 1 {
                     cur = 0;
                 } else {
-                    cur = cur + 1;
+                    cur += 1;
                 }
             }
 
@@ -178,12 +178,12 @@ impl WriteAheadLog {
             // Update the block data structure
             let offset = LH_PAGE_HDRS_OFFS + self.head * PAGE_HEADER_SIZE;
             set_u32(&mut self.header_data, offset, self.next_transaction_id);
-            set_u64(&mut self.header_data, offset + PH_FPID_OFFS, fpid.0);
+            set_u64(&mut self.header_data, offset + PH_FPID_OFFS, (*fpid).into());
 
             // Write the block data itself to the log.
             let write_fpid = FilePageId(self.log_start.0
                 + HEADER_BLOCKS as u64 + self.head as u64);
-            self.backing_store.borrow_mut().write(write_fpid, &block_data);
+            self.backing_store.borrow_mut().write(write_fpid, block_data);
             self.head = (self.head + 1) % self.num_log_blocks;
         }
 
@@ -210,7 +210,7 @@ impl WriteAheadLog {
     pub fn blocks_written(&mut self) {
         // Set tail = head
         let head = get_u16(&self.header_data, LH_HEAD_OFFS);
-        set_u16(&mut self.header_data, LH_TAIL_OFFS, head as u16);
+        set_u16(&mut self.header_data, LH_TAIL_OFFS, head);
         self.write_header();
     }
 }

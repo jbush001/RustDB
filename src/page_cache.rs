@@ -34,6 +34,17 @@ pub type PageData = [u8; PAGE_SIZE];
 #[derive(PartialEq, Ord, PartialOrd, Eq, Debug, Clone, Copy, Hash, Default)]
 pub struct FilePageId(pub u64);
 
+impl FilePageId {
+    pub const INVALID: Self = FilePageId(u64::MAX);
+}
+
+impl From<FilePageId> for u64 {
+    #[inline]
+    fn from(id: FilePageId) -> Self {
+        id.0
+    }
+}
+
 // This is the interface to the underlying storage, called by this module
 // to read and write pages.
 pub trait PersistentStore: Any {

@@ -132,7 +132,7 @@ impl Collection {
 
             let mut offset = 1; // Skip the flag byte we speculatively added
             let mut fpid = page_allocator.alloc();
-            set_u64(&mut pointer, 9, fpid.0);
+            set_u64(&mut pointer, 9, fpid.into());
             while offset < content.len() {
                 let mut page = page_cache.lock_page_mut(fpid);
                 let to_copy = std::cmp::min(content.len() - offset, PAGE_SIZE - 8);
@@ -140,10 +140,10 @@ impl Collection {
                 fpid = if offset + to_copy < content.len() {
                     page_allocator.alloc()
                 } else {
-                    NULL_FPID
+                    FilePageId::INVALID
                 };
 
-                set_u64(&mut page[..], 0, fpid.0);
+                set_u64(&mut page[..], 0, fpid.into());
                 offset += to_copy;
             }
 
@@ -243,7 +243,7 @@ impl Collection {
         // Free overflow pages if present
         if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
             let mut current_fpid = FilePageId(get_u64(&document_bytes, 9));
-            while current_fpid != NULL_FPID {
+            while current_fpid != FilePageId::INVALID {
                 let page = page_cache.lock_page(current_fpid);
                 let next_page = FilePageId(get_u64(&page[..], 0));
                 drop(page);
@@ -273,7 +273,7 @@ fn get_document_body(document_bytes: &[u8], page_cache: &PageCache) -> Value {
 
         let mut content = Vec::with_capacity(length);
         while length > 0 {
-            if current_fpid == NULL_FPID {
+            if current_fpid == FilePageId::INVALID {
                 panic!("Error: record truncated");
             }
 
@@ -1247,7 +1247,7 @@ mod tests {
         // XXX hack hard coded page address
         {
             let mut page = page_cache.lock_page_mut(FilePageId(fpid.0 + 1));
-            page[0..8].fill(0); // Set to null
+            set_u64(&mut page[..], 0, FilePageId::INVALID.0);
         }
 
         SequentialScan::new(&collection, &page_cache).next();
