@@ -57,16 +57,16 @@ impl Collection {
             indices.push(Index{
                 field: FieldPath::new(index["path"].as_str()
                     .expect("path is not a string")).expect("invalid field path"),
-                btree: BTree::open(PageIndex(index["root_pidx"].as_u64()
-                    .expect("root_pidx is not an integer")))
+                btree: BTree::open(PageNum(index["root_pnum"].as_u64()
+                    .expect("root_pnum is not an integer")))
             });
         }
 
         Collection {
             name: metadata["name"].to_string(),
             next_docid: 1,
-            document_tree: BTree::open(PageIndex(metadata["root_page_pidx"].as_u64()
-                .expect("root_page_pidx is not an integer"))),
+            document_tree: BTree::open(PageNum(metadata["root_page_pnum"].as_u64()
+                .expect("root_page_pnum is not an integer"))),
             indices
         }
     }
@@ -80,7 +80,7 @@ impl Collection {
         }
     }
 
-    pub fn create_at(name: &str, page_cache: &PageCache, root_page: PageIndex) -> Self {
+    pub fn create_at(name: &str, page_cache: &PageCache, root_page: PageNum) -> Self {
         Collection {
             name: name.to_string(),
             next_docid: 1,
@@ -92,11 +92,11 @@ impl Collection {
     pub fn get_metadata(&self) -> Value {
         json!({
             "name": self.name,
-            "root_page_pidx": self.document_tree.get_root_page_id().0,
+            "root_page_pnum": self.document_tree.get_root_page_id().0,
             "indices": self.indices.iter().map(|index| {
                 json!({
                     "path": index.field.to_string(),
-                    "root_pidx": index.btree.get_root_page_id().0
+                    "root_pnum": index.btree.get_root_page_id().0
                 })
             }).collect::<Vec<Value>>()
         })
@@ -131,19 +131,19 @@ impl Collection {
             set_u64(&mut pointer, 1, content.len() as u64 - 1);
 
             let mut offset = 1; // Skip the flag byte we speculatively added
-            let mut page_index = page_allocator.alloc();
-            set_u64(&mut pointer, 9, page_index.into());
+            let mut page_num = page_allocator.alloc();
+            set_u64(&mut pointer, 9, page_num.into());
             while offset < content.len() {
-                let mut page = page_cache.lock_page_mut(page_index);
+                let mut page = page_cache.lock_page_mut(page_num);
                 let to_copy = std::cmp::min(content.len() - offset, PAGE_SIZE - 8);
                 page[8..8 + to_copy].copy_from_slice(&content[offset..offset + to_copy]);
-                page_index = if offset + to_copy < content.len() {
+                page_num = if offset + to_copy < content.len() {
                     page_allocator.alloc()
                 } else {
-                    PageIndex::INVALID
+                    PageNum::INVALID
                 };
 
-                set_u64(&mut page[..], 0, page_index.into());
+                set_u64(&mut page[..], 0, page_num.into());
                 offset += to_copy;
             }
 
@@ -242,13 +242,13 @@ impl Collection {
 
         // Free overflow pages if present
         if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
-            let mut current_pidx = PageIndex(get_u64(&document_bytes, 9));
-            while current_pidx != PageIndex::INVALID {
-                let page = page_cache.lock_page(current_pidx);
-                let next_page = PageIndex(get_u64(&page[..], 0));
+            let mut current_pnum = PageNum(get_u64(&document_bytes, 9));
+            while current_pnum != PageNum::INVALID {
+                let page = page_cache.lock_page(current_pnum);
+                let next_page = PageNum(get_u64(&page[..], 0));
                 drop(page);
-                page_allocator.free(current_pidx);
-                current_pidx = next_page;
+                page_allocator.free(current_pnum);
+                current_pnum = next_page;
             }
         }
 
@@ -269,16 +269,16 @@ fn get_document_body(document_bytes: &[u8], page_cache: &PageCache) -> Value {
     if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
         // This is using overflow pages
         let mut length = get_u64(document_bytes, 1) as usize;
-        let mut current_pidx = PageIndex(get_u64(document_bytes, 9));
+        let mut current_pnum = PageNum(get_u64(document_bytes, 9));
 
         let mut content = Vec::with_capacity(length);
         while length > 0 {
-            if current_pidx == PageIndex::INVALID {
+            if current_pnum == PageNum::INVALID {
                 panic!("Error: record truncated");
             }
 
-            let page = page_cache.lock_page(current_pidx);
-            current_pidx = PageIndex(get_u64(&page[..], 0));
+            let page = page_cache.lock_page(current_pnum);
+            current_pnum = PageNum(get_u64(&page[..], 0));
             let to_copy = std::cmp::min(length, PAGE_SIZE - 8);
             content.extend_from_slice(&page[8..8 + to_copy]);
             length -= to_copy;
@@ -1236,8 +1236,8 @@ mod tests {
 
         // XXX hack: allocate and free the page, which will tell us where the
         // pages will be placed.
-        let page_index = allocator.alloc();
-        allocator.free(page_index);
+        let page_num = allocator.alloc();
+        allocator.free(page_num);
 
         // Create a large document
         let large_value = "x".repeat(0x4000);
@@ -1246,8 +1246,8 @@ mod tests {
 
         // XXX hack hard coded page address
         {
-            let mut page = page_cache.lock_page_mut(PageIndex(page_index.0 + 1));
-            set_u64(&mut page[..], 0, PageIndex::INVALID.0);
+            let mut page = page_cache.lock_page_mut(PageNum(page_num.0 + 1));
+            set_u64(&mut page[..], 0, PageNum::INVALID.0);
         }
 
         SequentialScan::new(&collection, &page_cache).next();

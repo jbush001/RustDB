@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct MockPersistentStore {
-    saved_pages: HashMap<PageIndex, PageData>,
+    saved_pages: HashMap<PageNum, PageData>,
     write_limit: usize,
     hit_write_limit: bool
 }
@@ -47,15 +47,15 @@ impl MockPersistentStore {
 }
 
 impl PersistentStore for MockPersistentStore {
-    fn read(&mut self, page_index: PageIndex, page: &mut PageData) {
-        if self.saved_pages.contains_key(&page_index) {
-            page.copy_from_slice(self.saved_pages.get(&page_index).unwrap().as_slice());
+    fn read(&mut self, page_num: PageNum, page: &mut PageData) {
+        if self.saved_pages.contains_key(&page_num) {
+            page.copy_from_slice(self.saved_pages.get(&page_num).unwrap().as_slice());
         } else {
             page.fill(0);
         }
     }
 
-    fn write(&mut self, page_index: PageIndex, page: &PageData) {
+    fn write(&mut self, page_num: PageNum, page: &PageData) {
         if self.write_limit == 0 {
             self.hit_write_limit = true;
             return;
@@ -65,7 +65,7 @@ impl PersistentStore for MockPersistentStore {
                 self.write_limit = self.write_limit.saturating_sub(1);
         }
 
-        self.saved_pages.insert(page_index, *page);
+        self.saved_pages.insert(page_num, *page);
     }
 
     fn sync(&mut self) {
@@ -84,7 +84,7 @@ impl PersistentStore for MockPersistentStore {
 fn test_read_zeroes() {
     let mut mock = MockPersistentStore::default();
     let mut temp: PageData = [0; PAGE_SIZE];
-    mock.read(PageIndex(1), &mut temp);
+    mock.read(PageNum(1), &mut temp);
     assert_eq!(&temp, &[0; PAGE_SIZE]);
 }
 
@@ -92,15 +92,15 @@ fn test_read_zeroes() {
 fn test_readback() {
     let mut mock = MockPersistentStore::default();
     let temp1: PageData = [0xcc; PAGE_SIZE];
-    mock.write(PageIndex(1), &temp1);
+    mock.write(PageNum(1), &temp1);
 
     let mut temp2: PageData = [0; PAGE_SIZE];
-    mock.read(PageIndex(1), &mut temp2);
+    mock.read(PageNum(1), &mut temp2);
     assert_eq!(&temp1, &temp2);
 
     // Ensure other blocks are zero
     let mut temp3: PageData = [0; PAGE_SIZE];
-    mock.read(PageIndex(2), &mut temp3);
+    mock.read(PageNum(2), &mut temp3);
     assert_eq!(&[0; PAGE_SIZE], &temp3);
 }
 
@@ -119,21 +119,21 @@ fn test_any() {
 fn test_write_limit() {
     let mut mock = MockPersistentStore::default();
     mock.set_write_limit(3);
-    mock.write(PageIndex(1), &[0xaa; PAGE_SIZE]);
-    mock.write(PageIndex(2), &[0xbb; PAGE_SIZE]);
-    mock.write(PageIndex(3), &[0xcc; PAGE_SIZE]);
-    mock.write(PageIndex(4), &[0xdd; PAGE_SIZE]);
-    mock.write(PageIndex(5), &[0xee; PAGE_SIZE]);
+    mock.write(PageNum(1), &[0xaa; PAGE_SIZE]);
+    mock.write(PageNum(2), &[0xbb; PAGE_SIZE]);
+    mock.write(PageNum(3), &[0xcc; PAGE_SIZE]);
+    mock.write(PageNum(4), &[0xdd; PAGE_SIZE]);
+    mock.write(PageNum(5), &[0xee; PAGE_SIZE]);
 
     let mut temp: PageData = [0; PAGE_SIZE];
-    mock.read(PageIndex(1), &mut temp);
+    mock.read(PageNum(1), &mut temp);
     assert_eq!(temp, [0xaa; PAGE_SIZE]);
-    mock.read(PageIndex(2), &mut temp);
+    mock.read(PageNum(2), &mut temp);
     assert_eq!(temp, [0xbb; PAGE_SIZE]);
-    mock.read(PageIndex(3), &mut temp);
+    mock.read(PageNum(3), &mut temp);
     assert_eq!(temp, [0xcc; PAGE_SIZE]);
-    mock.read(PageIndex(4), &mut temp);
+    mock.read(PageNum(4), &mut temp);
     assert_eq!(temp, [0; PAGE_SIZE]);
-    mock.read(PageIndex(5), &mut temp);
+    mock.read(PageNum(5), &mut temp);
     assert_eq!(temp, [0; PAGE_SIZE]);
 }
