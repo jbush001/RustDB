@@ -30,17 +30,17 @@ pub const LOG_PAGES: usize = 10;
 pub const PAGE_SIZE: usize = 0x2000;
 pub type PageData = [u8; PAGE_SIZE];
 
-// This is the index into the file in page size increments.
+// This uniquely identifies a page size chunk inside the file.
 #[derive(PartialEq, Ord, PartialOrd, Eq, Debug, Clone, Copy, Hash, Default)]
-pub struct FilePageId(pub u64);
+pub struct PageIndex(pub u64);
 
-impl FilePageId {
-    pub const INVALID: Self = FilePageId(u64::MAX);
+impl PageIndex {
+    pub const INVALID: Self = PageIndex(u64::MAX);
 }
 
-impl From<FilePageId> for u64 {
+impl From<PageIndex> for u64 {
     #[inline]
-    fn from(id: FilePageId) -> Self {
+    fn from(id: PageIndex) -> Self {
         id.0
     }
 }
@@ -48,8 +48,8 @@ impl From<FilePageId> for u64 {
 // This is the interface to the underlying storage, called by this module
 // to read and write pages.
 pub trait PersistentStore: Any {
-    fn read(&mut self, fpid: FilePageId, page: &mut PageData);
-    fn write(&mut self, fpid: FilePageId, page: &PageData);
+    fn read(&mut self, fpid: PageIndex, page: &mut PageData);
+    fn write(&mut self, fpid: PageIndex, page: &PageData);
     fn sync(&mut self);
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -58,12 +58,14 @@ pub trait PersistentStore: Any {
 // Metadata and underlying storage for cached data.
 #[derive(Debug, Clone)]
 struct CachedPage {
-    fpid: Option<FilePageId>, // Which disk block this is from
+    fpid: Option<PageIndex>, // Which disk block this is from
     ref_count: u32,
     dirty: bool, // This differs from what is on disk and need to be written.
     data: Box<PageData>
 }
 
+// This is never constructed directly by users of the API, but is created
+// implicitly when locking a page.
 pub struct PageGuard {
     cache_slot: usize, // Index into array of cached pages
     data: *const PageData,
@@ -132,7 +134,7 @@ impl PageCache {
         }
     }
 
-    pub fn lock_page(&self, fpid: FilePageId) -> PageGuard {
+    pub fn lock_page(&self, fpid: PageIndex) -> PageGuard {
         let mut inner = self.inner.borrow_mut();
         let cache_slot = inner.lock_page_internal(fpid, false);
         let data: *const PageData = &*inner.pages[cache_slot].data;
@@ -145,7 +147,7 @@ impl PageCache {
 
     // If a page is locked mutable, it will be written back when
     // the transaction is complete.
-    pub fn lock_page_mut(&self, fpid: FilePageId) -> PageGuardMut {
+    pub fn lock_page_mut(&self, fpid: PageIndex) -> PageGuardMut {
         let mut inner = self.inner.borrow_mut();
         let cache_slot = inner.lock_page_internal(fpid, true);
         let data: *mut PageData = &mut *inner.pages[cache_slot].data;
@@ -173,7 +175,7 @@ impl PageCache {
 }
 
 struct PageCacheInner {
-    page_map: HashMap<FilePageId, usize>,
+    page_map: HashMap<PageIndex, usize>,
     pages: Vec<CachedPage>,
     lru: IndexQueue,
     dirty_page_list: IndexQueue,
@@ -196,12 +198,14 @@ impl PageCacheInner {
             persistent_store: persistent_store.clone(),
             transaction_active: false,
             dirty_page_list: IndexQueue::new(size),
-            write_ahead_log: WriteAheadLog::new(FilePageId(1), LOG_PAGES, &persistent_store)
+            write_ahead_log: WriteAheadLog::new(PageIndex(1), LOG_PAGES, &persistent_store)
         }
     }
 
-    fn lock_page_internal(&mut self, fpid: FilePageId, writable: bool) -> usize {
+    fn lock_page_internal(&mut self, fpid: PageIndex, writable: bool) -> usize {
         assert!(!writable || self.transaction_active);
+        assert!(fpid.0 == 0 || fpid.0 > LOG_PAGES as u64,
+            "Attempt to lock page in write ahead log");
 
         let entry = self.page_map.get(&fpid);
         match entry {
@@ -280,7 +284,7 @@ impl PageCacheInner {
         }
 
         // Write to journal
-        let pages: Vec<(FilePageId, PageData)> = self.dirty_page_list
+        let pages: Vec<(PageIndex, PageData)> = self.dirty_page_list
             .into_iter()
             .map(|index| (self.pages[index].fpid.unwrap(), *self.pages[index].data))
             .collect();
@@ -298,9 +302,7 @@ impl PageCacheInner {
         }
 
         self.transaction_active = false;
-
         self.persistent_store.borrow_mut().sync();
-
         self.write_ahead_log.blocks_written();
     }
 }
@@ -314,46 +316,34 @@ mod tests {
     use std::rc::Rc;
     use super::*;
 
-    fn with_mock<F>(io: &Rc<RefCell<dyn PersistentStore>>, f: F)
-    where F: FnOnce(&MockPersistentStore) {
-        let borrowed = io.borrow();
-        f(borrowed.as_any().downcast_ref::<MockPersistentStore>().unwrap());
-    }
-
-    fn with_mock_mut<F>(io: &Rc<RefCell<dyn PersistentStore>>, f: F)
-    where F: FnOnce(&mut MockPersistentStore) {
-        let mut borrowed = io.borrow_mut();
-        f(borrowed.as_any_mut().downcast_mut::<MockPersistentStore>().unwrap());
-    }
-
     fn setup_cache(capacity: usize) -> (Rc<RefCell<dyn PersistentStore>>, PageCache) {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
         let page_cache = PageCache::new(capacity, Rc::clone(&mock_io));
         (mock_io, page_cache)
     }
 
-    // PageData cache tests
     #[test]
     fn test_pc_lock_two_pages() {
         let (mock_io, page_cache) = setup_cache(5);
 
         // Fill the first page
-        mock_io.borrow_mut().write(FilePageId(100), &[0xcc; PAGE_SIZE]);
+        mock_io.borrow_mut().write(PageIndex(100), &[0xcc; PAGE_SIZE]);
 
         {
-            let guard = page_cache.lock_page(FilePageId(100));
+            let guard = page_cache.lock_page(PageIndex(100));
             assert_eq!(*guard, [0xcc; PAGE_SIZE]);
         }
 
         // Read a different page
-        mock_io.borrow_mut().write(FilePageId(101), &[0xdd; PAGE_SIZE]);
-
-        let guard = page_cache.lock_page(FilePageId(101));
-        assert_eq!(*guard, [0xdd; PAGE_SIZE]);
+        mock_io.borrow_mut().write(PageIndex(101), &[0xdd; PAGE_SIZE]);
+        {
+            let guard = page_cache.lock_page(PageIndex(101));
+            assert_eq!(*guard, [0xdd; PAGE_SIZE]);
+        }
 
         // Now read the original page. It's cached, so it will not need to be re-read
         {
-            let guard = page_cache.lock_page(FilePageId(100));
+            let guard = page_cache.lock_page(PageIndex(100));
             assert_eq!(*guard, [0xcc; PAGE_SIZE]);
         }
     }
@@ -368,13 +358,13 @@ mod tests {
             let _transaction = page_cache.begin_transaction();
 
             // Read a page, set the wriable bit
-            let mut guard = page_cache.lock_page_mut(FilePageId(100));
+            let mut guard = page_cache.lock_page_mut(PageIndex(100));
             *guard = [0xcc; PAGE_SIZE];
         }
 
         // Unlocking will cause a writeback. Ensure the backing store is correct.
         let mut readback: PageData = [0; PAGE_SIZE];
-        mock_io.borrow_mut().read(FilePageId(100), &mut readback);
+        mock_io.borrow_mut().read(PageIndex(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
     }
 
@@ -389,7 +379,7 @@ mod tests {
             let _transaction = page_cache.begin_transaction();
 
             // Read a page, set the writable bit
-            let _guard = page_cache.lock_page_mut(FilePageId(100));
+            let _guard = page_cache.lock_page_mut(PageIndex(100));
         }
 
         // Now lock the page again.
@@ -397,18 +387,16 @@ mod tests {
             let _transaction = page_cache.begin_transaction();
 
             // Read a page, set the writable bit
-            let mut guard = page_cache.lock_page_mut(FilePageId(100));
+            let mut guard = page_cache.lock_page_mut(PageIndex(100));
             *guard = [0xcc; PAGE_SIZE];
         }
-
 
         // Unlocking will cause a writeback.
         // We only check the first byte, but ensure it is updated correctly.
         let mut readback: PageData = [0; PAGE_SIZE];
-        mock_io.borrow_mut().read(FilePageId(100), &mut readback);
+        mock_io.borrow_mut().read(PageIndex(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
     }
-
 
     // it's possible within a transaction we will lock the same page twice for
     // modification. Ensure this doesn't assert.
@@ -416,16 +404,16 @@ mod tests {
     fn test_pc_dirty_relock() {
         let (mock_io, page_cache) = setup_cache(5);
         let transaction = page_cache.begin_transaction();
-        let guard1 = page_cache.lock_page_mut(FilePageId(100));
+        let guard1 = page_cache.lock_page_mut(PageIndex(100));
         drop(guard1);
-        let mut guard2 = page_cache.lock_page_mut(FilePageId(100));
+        let mut guard2 = page_cache.lock_page_mut(PageIndex(100));
         *guard2 = [0xcc; PAGE_SIZE];
         drop(guard2);
 
         drop(transaction);
 
         let mut readback: PageData = [0; PAGE_SIZE];
-        mock_io.borrow_mut().read(FilePageId(100), &mut readback);
+        mock_io.borrow_mut().read(PageIndex(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
     }
 
@@ -435,12 +423,12 @@ mod tests {
         let (_mock_io, page_cache) = setup_cache(5);
 
         let _transaction = page_cache.begin_transaction();
-        let _guard1 = page_cache.lock_page_mut(FilePageId(100));
-        let _guard2 = page_cache.lock_page_mut(FilePageId(101));
-        let _guard3 = page_cache.lock_page_mut(FilePageId(102));
-        let _guard4 = page_cache.lock_page_mut(FilePageId(103));
-        let _guard5 = page_cache.lock_page_mut(FilePageId(104));
-        let _guard6 = page_cache.lock_page_mut(FilePageId(105));
+        let _guard1 = page_cache.lock_page_mut(PageIndex(100));
+        let _guard2 = page_cache.lock_page_mut(PageIndex(101));
+        let _guard3 = page_cache.lock_page_mut(PageIndex(102));
+        let _guard4 = page_cache.lock_page_mut(PageIndex(103));
+        let _guard5 = page_cache.lock_page_mut(PageIndex(104));
+        let _guard6 = page_cache.lock_page_mut(PageIndex(105));
     }
 
     #[test]
@@ -467,7 +455,7 @@ mod tests {
         let mock_io: Rc<RefCell<dyn PersistentStore>> =
             Rc::new(RefCell::new(MockPersistentStore::default()));
         let page_cache = PageCache::new(10, Rc::clone(&mock_io));
-        let _guard = page_cache.lock_page_mut(FilePageId(3));
+        let _guard = page_cache.lock_page_mut(PageIndex(3));
     }
 
     // Lock the same page twice for write in the same transaction
@@ -479,8 +467,8 @@ mod tests {
             Rc::new(RefCell::new(MockPersistentStore::default()));
         let page_cache = PageCache::new(10, Rc::clone(&mock_io));
         let _transaction = page_cache.begin_transaction();
-        let _guard1 = page_cache.lock_page_mut(FilePageId(100));
-        let _guard2 = page_cache.lock_page_mut(FilePageId(100));
+        let _guard1 = page_cache.lock_page_mut(PageIndex(100));
+        let _guard2 = page_cache.lock_page_mut(PageIndex(100));
     }
 
     // Lock first read, then write, ensure it gets written back
@@ -493,13 +481,13 @@ mod tests {
         const WRITE_VAL: u8 = 0xcc;
         {
             let _transaction = page_cache.begin_transaction();
-            let _guard1 = page_cache.lock_page(FilePageId(100));
-            let mut guard = page_cache.lock_page_mut(FilePageId(100));
+            let _guard1 = page_cache.lock_page(PageIndex(100));
+            let mut guard = page_cache.lock_page_mut(PageIndex(100));
             *guard = [0xcc; PAGE_SIZE];
         }
 
         let mut readback: PageData = [0; PAGE_SIZE];
-        mock_io.borrow_mut().read(FilePageId(100), &mut readback);
+        mock_io.borrow_mut().read(PageIndex(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
     }
 
@@ -511,15 +499,22 @@ mod tests {
         const WRITE_VAL: u8 = 0xcc;
         {
             let _transaction = page_cache.begin_transaction();
-            let mut guard1 = page_cache.lock_page_mut(FilePageId(100));
+            let mut guard1 = page_cache.lock_page_mut(PageIndex(100));
             *guard1 = [0xcc; PAGE_SIZE];
 
-            let _guard2 = page_cache.lock_page(FilePageId(100));
+            let _guard2 = page_cache.lock_page(PageIndex(100));
         }
 
         let mut readback: PageData = [0; PAGE_SIZE];
-        mock_io.borrow_mut().read(FilePageId(100), &mut readback);
+        mock_io.borrow_mut().read(PageIndex(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
+    }
+
+    #[test]
+    #[should_panic = "Attempt to lock page in write ahead log"]
+    fn test_write_ahead_page() {
+        let (_mock_io, page_cache) = setup_cache(5);
+        let _guard = page_cache.lock_page(PageIndex(2));
     }
 
     #[test]
@@ -527,12 +522,10 @@ mod tests {
         const TOTAL_PAGES: usize = 30;
         const CACHE_PAGES: usize = 10;
 
-        let seed: u64 = 0x12345;
-        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut rng = SmallRng::seed_from_u64(0x12345);
         let mock_io: Rc<RefCell<dyn PersistentStore>> =
             Rc::new(RefCell::new(MockPersistentStore::default()));
         let page_cache = PageCache::new(CACHE_PAGES, Rc::clone(&mock_io));
-        let page_indices: Vec<usize> = (LOG_PAGES + 1..LOG_PAGES + 1 + TOTAL_PAGES).collect();
         let mut oracle: Vec<PageData> = vec![[0u8; PAGE_SIZE]; TOTAL_PAGES + LOG_PAGES + 1];
 
         for _ in 0..10000 {
@@ -545,14 +538,14 @@ mod tests {
                 // Note the same file page may be locked multiple times (3.33% chance)
                 let fpid = rng.random_range(LOG_PAGES + 1..TOTAL_PAGES + LOG_PAGES + 1);
                 // Randomly decide if to lock for read or write
-                if rng.random::<f32>() > 0.5 {
-                    let mut guard = page_cache.lock_page_mut(FilePageId(fpid as u64));
+                if rng.random_bool(0.5) {
+                    let mut guard = page_cache.lock_page_mut(PageIndex(fpid as u64));
                     assert_eq!(*guard, oracle[fpid]);
                     rng.fill(&mut oracle[fpid]);
                     guard.copy_from_slice(oracle[fpid].as_slice());
                     mut_guards.push(guard);
                 } else {
-                    let guard = page_cache.lock_page(FilePageId(fpid as u64));
+                    let guard = page_cache.lock_page(PageIndex(fpid as u64));
                     assert_eq!(*guard, oracle[fpid]);
                     guards.push(guard);
                 }
@@ -562,8 +555,8 @@ mod tests {
         }
 
         // Check all pages
-        for fpid in page_indices {
-            let guard = page_cache.lock_page(FilePageId(fpid as u64));
+        for fpid in LOG_PAGES + 1..LOG_PAGES + 1 + TOTAL_PAGES {
+            let guard = page_cache.lock_page(PageIndex(fpid as u64));
             assert_eq!(*guard, oracle[fpid]);
         }
     }

@@ -81,14 +81,14 @@ pub struct WriteAheadLog {
     next_transaction_id: u32,
     next_header_seq: u32, // Even sequences go to block 0, odd to 1
     header_data: PageData,  // Contents of next header to be written
-    log_start: FilePageId,
+    log_start: PageIndex,
     num_log_blocks: usize,
     head: usize,
     tail: usize
 }
 
 impl WriteAheadLog {
-    pub fn new(start: FilePageId, size: usize, backing_store: &Rc<RefCell<dyn PersistentStore>>) -> Self {
+    pub fn new(start: PageIndex, size: usize, backing_store: &Rc<RefCell<dyn PersistentStore>>) -> Self {
         Self {
             backing_store: backing_store.clone(),
             next_transaction_id: 1,
@@ -107,7 +107,7 @@ impl WriteAheadLog {
         let mut header_b: PageData = [0; PAGE_SIZE];
         let mut store = self.backing_store.borrow_mut();
         store.read(self.log_start, &mut header_a);
-        store.read(FilePageId(self.log_start.0 + 1), &mut header_b);
+        store.read(PageIndex(self.log_start.0 + 1), &mut header_b);
 
         // Validate checksums, find newest
         let a_valid = checksum(&header_a[4..]) == get_u32(&header_a, LH_CHECKSUM_OFFS);
@@ -151,10 +151,10 @@ impl WriteAheadLog {
             for _ in 0..count {
                 let mut block: PageData = [0; PAGE_SIZE];
                 // Copy from log to file area
-                let read_fpid = FilePageId(self.log_start.0
+                let read_fpid = PageIndex(self.log_start.0
                     + HEADER_BLOCKS as u64 + cur as u64);
                 store.read(read_fpid, &mut block);
-                let write_fpid = FilePageId(get_u64(&self.header_data,
+                let write_fpid = PageIndex(get_u64(&self.header_data,
                     LH_PAGE_HDRS_OFFS + cur * PAGE_HEADER_SIZE + PH_FPID_OFFS));
                 store.write(write_fpid, &block);
 
@@ -172,7 +172,7 @@ impl WriteAheadLog {
         }
     }
 
-    pub fn log_transaction(&mut self, pages: &Vec<(FilePageId, PageData)>) {
+    pub fn log_transaction(&mut self, pages: &Vec<(PageIndex, PageData)>) {
         // Write all transaction blocks to log.
         for (fpid, block_data) in pages {
             // Update the block data structure
@@ -181,7 +181,7 @@ impl WriteAheadLog {
             set_u64(&mut self.header_data, offset + PH_FPID_OFFS, (*fpid).into());
 
             // Write the block data itself to the log.
-            let write_fpid = FilePageId(self.log_start.0
+            let write_fpid = PageIndex(self.log_start.0
                 + HEADER_BLOCKS as u64 + self.head as u64);
             self.backing_store.borrow_mut().write(write_fpid, block_data);
             self.head = (self.head + 1) % self.num_log_blocks;
@@ -200,7 +200,7 @@ impl WriteAheadLog {
         set_u32(&mut self.header_data, LH_SEQ_OFFS, header_seq);
         let sum = checksum(&self.header_data[4..]);
         set_u32(&mut self.header_data, LH_CHECKSUM_OFFS, sum);
-        self.backing_store.borrow_mut().write(FilePageId(self.log_start.0 +
+        self.backing_store.borrow_mut().write(PageIndex(self.log_start.0 +
             (header_seq & 1) as u64), &self.header_data);
     }
 
@@ -228,21 +228,21 @@ mod tests {
         let mock_io: Rc<RefCell<dyn PersistentStore>> =
             Rc::new(RefCell::new(MockPersistentStore::default()));
 
-        let mut log1 = WriteAheadLog::new(FilePageId(2), 10, &mock_io);
+        let mut log1 = WriteAheadLog::new(PageIndex(2), 10, &mock_io);
         log1.log_transaction(&vec![
-            (FilePageId(13), [1; PAGE_SIZE]),
-            (FilePageId(15), [2; PAGE_SIZE])
+            (PageIndex(13), [1; PAGE_SIZE]),
+            (PageIndex(15), [2; PAGE_SIZE])
         ]);
 
         // Reopen, replay transaction
-        let mut log2 = WriteAheadLog::new(FilePageId(2), 10, &mock_io);
+        let mut log2 = WriteAheadLog::new(PageIndex(2), 10, &mock_io);
         log2.replay();
 
         let mut store = mock_io.borrow_mut();
         let mut block: PageData = [0; PAGE_SIZE];
-        store.read(FilePageId(13), &mut block);
+        store.read(PageIndex(13), &mut block);
         assert_eq!(block, [1; PAGE_SIZE]);
-        store.read(FilePageId(15), &mut block);
+        store.read(PageIndex(15), &mut block);
         assert_eq!(block, [2; PAGE_SIZE]);
     }
 
@@ -251,31 +251,31 @@ mod tests {
         let mock_io: Rc<RefCell<dyn PersistentStore>> =
             Rc::new(RefCell::new(MockPersistentStore::default()));
 
-        let mut log1 = WriteAheadLog::new(FilePageId(2), 7, &mock_io);
+        let mut log1 = WriteAheadLog::new(PageIndex(2), 7, &mock_io);
         log1.log_transaction(&vec![
-            (FilePageId(13), [1; PAGE_SIZE]),
-            (FilePageId(14), [2; PAGE_SIZE]),
-            (FilePageId(15), [3; PAGE_SIZE]),
+            (PageIndex(13), [1; PAGE_SIZE]),
+            (PageIndex(14), [2; PAGE_SIZE]),
+            (PageIndex(15), [3; PAGE_SIZE]),
         ]);
 
-        mock_io.borrow_mut().write(FilePageId(13), &[1; PAGE_SIZE]);
-        mock_io.borrow_mut().write(FilePageId(14), &[2; PAGE_SIZE]);
-        mock_io.borrow_mut().write(FilePageId(15), &[3; PAGE_SIZE]);
+        mock_io.borrow_mut().write(PageIndex(13), &[1; PAGE_SIZE]);
+        mock_io.borrow_mut().write(PageIndex(14), &[2; PAGE_SIZE]);
+        mock_io.borrow_mut().write(PageIndex(15), &[3; PAGE_SIZE]);
         log1.blocks_written();
 
         log1.log_transaction(&vec![
-            (FilePageId(16), [4; PAGE_SIZE]),
-            (FilePageId(17), [5; PAGE_SIZE]),
-            (FilePageId(18), [6; PAGE_SIZE])
+            (PageIndex(16), [4; PAGE_SIZE]),
+            (PageIndex(17), [5; PAGE_SIZE]),
+            (PageIndex(18), [6; PAGE_SIZE])
         ]);
 
         // Reopen, replay transaction
-        let mut log2 = WriteAheadLog::new(FilePageId(2), 7, &mock_io);
+        let mut log2 = WriteAheadLog::new(PageIndex(2), 7, &mock_io);
         log2.replay();
 
         let mut block: PageData = [0; PAGE_SIZE];
         for i in 0..5 {
-            mock_io.borrow_mut().read(FilePageId(13 + i as u64), &mut block);
+            mock_io.borrow_mut().read(PageIndex(13 + i as u64), &mut block);
             assert_eq!(block, [i + 1; PAGE_SIZE]);
         }
     }
@@ -286,25 +286,25 @@ mod tests {
         let mock_io: Rc<RefCell<dyn PersistentStore>> =
             Rc::new(RefCell::new(MockPersistentStore::default()));
 
-        let mut log1 = WriteAheadLog::new(FilePageId(2), 10, &mock_io);
+        let mut log1 = WriteAheadLog::new(PageIndex(2), 10, &mock_io);
         log1.log_transaction(&vec![
-            (FilePageId(13), [1; PAGE_SIZE]),
-            (FilePageId(15), [2; PAGE_SIZE])
+            (PageIndex(13), [1; PAGE_SIZE]),
+            (PageIndex(15), [2; PAGE_SIZE])
         ]);
 
         log1.blocks_written();
 
         // Reopen
-        let mut log2 = WriteAheadLog::new(FilePageId(2), 10, &mock_io);
+        let mut log2 = WriteAheadLog::new(PageIndex(2), 10, &mock_io);
         log2.replay();
 
         // Okay, we never actually wrote these blocks, so the replay will
         // do nothing and the blocks will be zero.
         let mut store = mock_io.borrow_mut();
         let mut block: PageData = [0; PAGE_SIZE];
-        store.read(FilePageId(13), &mut block);
+        store.read(PageIndex(13), &mut block);
         assert_eq!(block, [0; PAGE_SIZE]);
-        store.read(FilePageId(15), &mut block);
+        store.read(PageIndex(15), &mut block);
         assert_eq!(block, [0; PAGE_SIZE]);
     }
 
@@ -324,7 +324,7 @@ mod tests {
             mock_io.borrow_mut().as_any_mut().downcast_mut::<MockPersistentStore>().unwrap()
                 .set_write_limit(rng.random_range(1..50));
 
-            let mut log = WriteAheadLog::new(FilePageId(LOG_START as u64), LOG_SIZE as usize, &mock_io);
+            let mut log = WriteAheadLog::new(PageIndex(LOG_START as u64), LOG_SIZE as usize, &mock_io);
             log.replay();
             if mock_io.borrow().as_any().downcast_ref::<MockPersistentStore>().unwrap().hit_write_limit() {
                 // Failed to write, did not replay log, it is not yet consistent with oracle, so
@@ -335,7 +335,7 @@ mod tests {
             // Validate disk against the oracle
             for (block_index, expected) in oracle.iter().enumerate().skip(START_OF_DATA) {
                 let mut temp: PageData = [0; PAGE_SIZE];
-                mock_io.borrow_mut().read(FilePageId(block_index as u64), &mut temp);
+                mock_io.borrow_mut().read(PageIndex(block_index as u64), &mut temp);
                 assert_eq!(temp, *expected);
             }
 
@@ -344,10 +344,10 @@ mod tests {
             for _ti in 0..transaction_count {
                 let page_count = rng.random_range(1..5);
                 let block_offsets: Vec<usize> = index::sample(&mut rng, FS_SIZE - START_OF_DATA, page_count).into_vec();
-                let pages: Vec<(FilePageId, PageData)> = block_offsets.into_iter().map(|offset| {
+                let pages: Vec<(PageIndex, PageData)> = block_offsets.into_iter().map(|offset| {
                     let mut data: PageData = [0; PAGE_SIZE];
                     rng.fill(&mut data);
-                    let fpid = FilePageId((START_OF_DATA + offset) as u64);
+                    let fpid = PageIndex((START_OF_DATA + offset) as u64);
                     (fpid, data)
                 }).collect();
                 log.log_transaction(&pages);

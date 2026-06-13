@@ -57,7 +57,7 @@ impl Collection {
             indices.push(Index{
                 field: FieldPath::new(index["path"].as_str()
                     .expect("path is not a string")).expect("invalid field path"),
-                btree: BTree::open(FilePageId(index["root_fpid"].as_u64()
+                btree: BTree::open(PageIndex(index["root_fpid"].as_u64()
                     .expect("root_fpid is not an integer")))
             });
         }
@@ -65,7 +65,7 @@ impl Collection {
         Collection {
             name: metadata["name"].to_string(),
             next_docid: 1,
-            document_tree: BTree::open(FilePageId(metadata["root_page_fpid"].as_u64()
+            document_tree: BTree::open(PageIndex(metadata["root_page_fpid"].as_u64()
                 .expect("root_page_fpid is not an integer"))),
             indices
         }
@@ -80,7 +80,7 @@ impl Collection {
         }
     }
 
-    pub fn create_at(name: &str, page_cache: &PageCache, root_page: FilePageId) -> Self {
+    pub fn create_at(name: &str, page_cache: &PageCache, root_page: PageIndex) -> Self {
         Collection {
             name: name.to_string(),
             next_docid: 1,
@@ -140,7 +140,7 @@ impl Collection {
                 fpid = if offset + to_copy < content.len() {
                     page_allocator.alloc()
                 } else {
-                    FilePageId::INVALID
+                    PageIndex::INVALID
                 };
 
                 set_u64(&mut page[..], 0, fpid.into());
@@ -242,10 +242,10 @@ impl Collection {
 
         // Free overflow pages if present
         if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
-            let mut current_fpid = FilePageId(get_u64(&document_bytes, 9));
-            while current_fpid != FilePageId::INVALID {
+            let mut current_fpid = PageIndex(get_u64(&document_bytes, 9));
+            while current_fpid != PageIndex::INVALID {
                 let page = page_cache.lock_page(current_fpid);
-                let next_page = FilePageId(get_u64(&page[..], 0));
+                let next_page = PageIndex(get_u64(&page[..], 0));
                 drop(page);
                 page_allocator.free(current_fpid);
                 current_fpid = next_page;
@@ -269,16 +269,16 @@ fn get_document_body(document_bytes: &[u8], page_cache: &PageCache) -> Value {
     if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
         // This is using overflow pages
         let mut length = get_u64(document_bytes, 1) as usize;
-        let mut current_fpid = FilePageId(get_u64(document_bytes, 9));
+        let mut current_fpid = PageIndex(get_u64(document_bytes, 9));
 
         let mut content = Vec::with_capacity(length);
         while length > 0 {
-            if current_fpid == FilePageId::INVALID {
+            if current_fpid == PageIndex::INVALID {
                 panic!("Error: record truncated");
             }
 
             let page = page_cache.lock_page(current_fpid);
-            current_fpid = FilePageId(get_u64(&page[..], 0));
+            current_fpid = PageIndex(get_u64(&page[..], 0));
             let to_copy = std::cmp::min(length, PAGE_SIZE - 8);
             content.extend_from_slice(&page[8..8 + to_copy]);
             length -= to_copy;
@@ -1246,8 +1246,8 @@ mod tests {
 
         // XXX hack hard coded page address
         {
-            let mut page = page_cache.lock_page_mut(FilePageId(fpid.0 + 1));
-            set_u64(&mut page[..], 0, FilePageId::INVALID.0);
+            let mut page = page_cache.lock_page_mut(PageIndex(fpid.0 + 1));
+            set_u64(&mut page[..], 0, PageIndex::INVALID.0);
         }
 
         SequentialScan::new(&collection, &page_cache).next();

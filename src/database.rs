@@ -16,7 +16,7 @@
 
 use crate::collection::*;
 use crate::page_allocator::PageAllocator;
-use crate::page_cache::{PageCache, PersistentStore, TransactionGuard, LOG_PAGES, FilePageId};
+use crate::page_cache::{PageCache, PersistentStore, TransactionGuard, LOG_PAGES, PageIndex};
 use crate::superblock::*;
 use serde_json::{json, Value};
 use std::cell::RefCell;
@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 const PAGE_CACHE_SIZE: usize = 128;
-const META_COLLECTION_FPID: FilePageId = FilePageId(LOG_PAGES as u64 + 1);
+const META_COLLECTION_FPID: PageIndex = PageIndex(LOG_PAGES as u64 + 1);
 
 pub struct Database {
     meta_collection: Collection,  // On-disk storage of collection metadata

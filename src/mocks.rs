@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct MockPersistentStore {
-    saved_pages: HashMap<FilePageId, PageData>,
+    saved_pages: HashMap<PageIndex, PageData>,
     write_limit: usize
 }
 
@@ -44,7 +44,7 @@ impl MockPersistentStore {
 }
 
 impl PersistentStore for MockPersistentStore {
-    fn read(&mut self, fpid: FilePageId, page: &mut PageData) {
+    fn read(&mut self, fpid: PageIndex, page: &mut PageData) {
         if self.saved_pages.contains_key(&fpid) {
             page.copy_from_slice(self.saved_pages.get(&fpid).unwrap().as_slice());
         } else {
@@ -52,7 +52,7 @@ impl PersistentStore for MockPersistentStore {
         }
     }
 
-    fn write(&mut self, fpid: FilePageId, page: &PageData) {
+    fn write(&mut self, fpid: PageIndex, page: &PageData) {
         if self.write_limit != usize::MAX && self.write_limit > 0 {
             self.write_limit -= 1;
         }
@@ -80,7 +80,7 @@ impl PersistentStore for MockPersistentStore {
 fn test_read_zeroes() {
     let mut mock = MockPersistentStore::default();
     let mut temp: PageData = [0; PAGE_SIZE];
-    mock.read(FilePageId(1), &mut temp);
+    mock.read(PageIndex(1), &mut temp);
     assert_eq!(&temp, &[0; PAGE_SIZE]);
 }
 
@@ -88,15 +88,15 @@ fn test_read_zeroes() {
 fn test_readback() {
     let mut mock = MockPersistentStore::default();
     let mut temp1: PageData = [0xcc; PAGE_SIZE];
-    mock.write(FilePageId(1), &mut temp1);
+    mock.write(PageIndex(1), &mut temp1);
 
     let mut temp2: PageData = [0; PAGE_SIZE];
-    mock.read(FilePageId(1), &mut temp2);
+    mock.read(PageIndex(1), &mut temp2);
     assert_eq!(&temp1, &temp2);
 
     // Ensure other blocks are zero
     let mut temp3: PageData = [0; PAGE_SIZE];
-    mock.read(FilePageId(2), &mut temp3);
+    mock.read(PageIndex(2), &mut temp3);
     assert_eq!(&[0; PAGE_SIZE], &temp3);
 }
 

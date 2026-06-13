@@ -32,12 +32,12 @@ pub struct Superblock {
     pub file_size: u64
 }
 
-pub const SUPERBLOCK_FPID: FilePageId = FilePageId(0);
+pub const SUPERBLOCK_FPID: PageIndex = PageIndex(0);
 
 pub fn init_superblock(page: &mut PageData) {
     let block = get_superblock_mut(page);
     block.magic.copy_from_slice(SUPERBLOCK_MAGIC);
-    block.free_list_head = FilePageId::INVALID.0;
+    block.free_list_head = PageIndex::INVALID.0;
     block.file_size = LOG_PAGES as u64 + 2;
 }
 

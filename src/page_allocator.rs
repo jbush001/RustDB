@@ -25,8 +25,8 @@ use crate::util::*;
 
 pub struct PageAllocator {
     page_cache: PageCache,
-    next_frontier: FilePageId,
-    free_list_head: FilePageId
+    next_frontier: PageIndex,
+    free_list_head: PageIndex
 }
 
 impl PageAllocator {
@@ -39,22 +39,24 @@ impl PageAllocator {
         let page_cache = page_cache.clone();
         PageAllocator {
             page_cache,
-            next_frontier: FilePageId(superblock.file_size),
-            free_list_head: FilePageId(superblock.free_list_head)
+            next_frontier: PageIndex(superblock.file_size),
+            free_list_head: PageIndex(superblock.free_list_head)
         }
     }
 
-    pub fn alloc(&mut self) -> FilePageId {
-        if self.free_list_head != FilePageId::INVALID {
+    pub fn alloc(&mut self) -> PageIndex {
+        if self.free_list_head != PageIndex::INVALID {
             let result = self.free_list_head;
             {
                 let page = self.page_cache.lock_page(self.free_list_head);
-                self.free_list_head = FilePageId(get_u64(&page[..], 0));
+                self.free_list_head = PageIndex(get_u64(&page[..], 0));
             }
 
             let mut page = self.page_cache.lock_page_mut(SUPERBLOCK_FPID);
             let superblock = get_superblock_mut(&mut page);
             superblock.free_list_head = self.free_list_head.0;
+
+            assert!(result.0 >= LOG_PAGES as u64 + 2);
 
             result
         } else {
@@ -65,11 +67,15 @@ impl PageAllocator {
             let superblock = get_superblock_mut(&mut page);
             superblock.file_size = self.next_frontier.0;
 
+            assert!(result.0 >= LOG_PAGES as u64 + 2);
+
             result
         }
     }
 
-    pub fn free(&mut self, fpid: FilePageId) {
+    pub fn free(&mut self, fpid: PageIndex) {
+        assert!(fpid.0 >= LOG_PAGES as u64 + 2);
+
         {
             let mut page = self.page_cache.lock_page_mut(fpid);
             set_u64(&mut page[..], 0, self.free_list_head.0);
