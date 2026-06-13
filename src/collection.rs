@@ -71,11 +71,20 @@ impl Collection {
         }
     }
 
-    pub fn create(name: &str, page_cache: &PageCache,page_allocator: &mut PageAllocator) -> Self {
+    pub fn create(name: &str, page_cache: &PageCache, page_allocator: &mut PageAllocator) -> Self {
         Collection {
             name: name.to_string(),
             next_docid: 1,
             document_tree: BTree::create(page_cache, page_allocator),
+            indices: Vec::new()
+        }
+    }
+
+    pub fn create_at(name: &str, page_cache: &PageCache, root_page: FilePageId) -> Self {
+        Collection {
+            name: name.to_string(),
+            next_docid: 1,
+            document_tree: BTree::create_at(page_cache, root_page),
             indices: Vec::new()
         }
     }
@@ -1225,6 +1234,11 @@ mod tests {
         let (mut page_cache, mut allocator, mut collection) = create_collection();
         let _transaction = page_cache.begin_transaction();
 
+        // XXX hack: allocate and free the page, which will tell us where the
+        // pages will be placed.
+        let fpid = allocator.alloc();
+        allocator.free(fpid);
+
         // Create a large document
         let large_value = "x".repeat(0x4000);
         let doc = json!({"foo": large_value});
@@ -1232,7 +1246,7 @@ mod tests {
 
         // XXX hack hard coded page address
         {
-            let mut page = page_cache.lock_page_mut(FilePageId(LOG_PAGES as u64 + 2));
+            let mut page = page_cache.lock_page_mut(FilePageId(fpid.0 + 1));
             page[0..8].fill(0); // Set to null
         }
 

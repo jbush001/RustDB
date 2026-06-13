@@ -97,6 +97,10 @@ impl BTree {
     // Allocate a new page and initializes an on-disk btree
     pub fn create(page_cache: &PageCache, page_allocator: &mut PageAllocator) -> Self {
         let root = page_allocator.alloc();
+        Self::create_at(page_cache, root)
+    }
+
+    pub fn create_at(page_cache: &PageCache, root: FilePageId) -> Self {
         let mut page = page_cache.lock_page_mut(root);
         init_btree_node(&mut page);
 

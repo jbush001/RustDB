@@ -16,7 +16,7 @@
 
 use crate::collection::*;
 use crate::page_allocator::PageAllocator;
-use crate::page_cache::{PageCache, PersistentStore, TransactionGuard, LOG_PAGES};
+use crate::page_cache::{PageCache, PersistentStore, TransactionGuard, LOG_PAGES, FilePageId};
 use crate::superblock::*;
 use serde_json::{json, Value};
 use std::cell::RefCell;
@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 const PAGE_CACHE_SIZE: usize = 128;
+const META_COLLECTION_FPID: FilePageId = FilePageId(LOG_PAGES as u64 + 1);
 
 pub struct Database {
     meta_collection: Collection,  // On-disk storage of collection metadata
@@ -35,14 +36,16 @@ pub struct Database {
 impl Database {
     pub fn open(file_store: Rc<RefCell<dyn PersistentStore>>) -> Database {
         let page_cache = PageCache::new(PAGE_CACHE_SIZE, Rc::clone(&file_store));
-        let page_allocator = PageAllocator::new(&page_cache);
 
+        // Replay before accessing other data structures to ensure they are consistent.
         page_cache.replay();
+
+        let page_allocator = PageAllocator::new(&page_cache);
 
         // A bit of a hack: we know the first page that will be allocated is just
         // after the journal, so hard code it here.
         let meta_collection = Collection::open(
-            &json!({"indices": [], "root_page_fpid": LOG_PAGES + 1, "name": "_meta"}));
+            &json!({"indices": [], "root_page_fpid": META_COLLECTION_FPID.0, "name": "_meta"}));
         let mut collections = HashMap::new();
         let iter = SequentialScan::new(&meta_collection, &page_cache);
         for (docid, document) in iter {
@@ -66,10 +69,10 @@ impl Database {
         let mut page = page_cache.lock_page_mut(SUPERBLOCK_FPID);
         init_superblock(&mut page);
 
-        let mut page_allocator = PageAllocator::new(&page_cache);
+        let page_allocator = PageAllocator::new(&page_cache);
 
         Database {
-            meta_collection: Collection::create("_meta", &page_cache, &mut page_allocator),
+            meta_collection: Collection::create_at("_meta", &page_cache, META_COLLECTION_FPID),
             collections: HashMap::new(),
             page_cache,
             page_allocator
