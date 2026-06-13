@@ -206,6 +206,8 @@ impl PageCacheInner {
         assert!(!writable || self.transaction_active);
         assert!(page_num.0 == 0 || page_num.0 > LOG_PAGES as u64,
             "Attempt to lock page in write ahead log");
+        assert!(page_num != PageNum::INVALID,
+            "Attempt to lock invalid page");
 
         let entry = self.page_map.get(&page_num);
         match entry {
@@ -508,6 +510,13 @@ mod tests {
         let mut readback: PageData = [0; PAGE_SIZE];
         mock_io.borrow_mut().read(PageNum(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
+    }
+
+    #[test]
+    #[should_panic = "Attempt to lock invalid page"]
+    fn test_invalid_page() {
+        let (_mock_io, page_cache) = setup_cache(5);
+        let _guard = page_cache.lock_page(PageNum::INVALID);
     }
 
     #[test]

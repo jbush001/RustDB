@@ -26,7 +26,9 @@ use crate::util::*;
 pub struct PageAllocator {
     page_cache: PageCache,
     next_frontier: PageNum,
-    free_list_head: PageNum
+    free_list_head: PageNum,
+    pub total_allocs: usize,
+    pub total_frees: usize
 }
 
 impl PageAllocator {
@@ -40,11 +42,15 @@ impl PageAllocator {
         PageAllocator {
             page_cache,
             next_frontier: PageNum(superblock.file_size),
-            free_list_head: PageNum(superblock.free_list_head)
+            free_list_head: PageNum(superblock.free_list_head),
+            total_allocs: 0,
+            total_frees: 0
         }
     }
 
     pub fn alloc(&mut self) -> PageNum {
+        self.total_allocs += 1;
+
         if self.free_list_head != PageNum::INVALID {
             let result = self.free_list_head;
             {
@@ -75,6 +81,8 @@ impl PageAllocator {
 
     pub fn free(&mut self, page_num: PageNum) {
         assert!(page_num.0 >= LOG_PAGES as u64 + 2);
+
+        self.total_frees += 1;
 
         {
             let mut page = self.page_cache.lock_page_mut(page_num);

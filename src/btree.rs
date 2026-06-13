@@ -137,9 +137,14 @@ impl BTree {
 
             if reverse {
                 current_node_pnum = get_right_child(&page);
-            } else {
+            } else if get_num_vararray_entries(&page) > 0 {
                 current_node_pnum = PageNum(u64::from_le_bytes(get_entry_value(&page, 0)
                     .try_into().expect("value was not 8 bytes")));
+            } else {
+                // After a deletion, it's possible to have interior nodes
+                // that only have a right child.
+                assert!(get_right_child(&page) != PageNum::INVALID);
+                current_node_pnum = get_right_child(&page);
             }
         }
     }
@@ -276,8 +281,10 @@ impl BTree {
                     set_next_sib(&mut new_page, *node_pnum);
 
                     // Need to fix forward link
-                    let mut prev_sib_page = page_cache.lock_page_mut(get_prev_sib(&page));
-                    set_next_sib(&mut prev_sib_page, new_page_pnum);
+                    if get_prev_sib(&page) != PageNum::INVALID {
+                        let mut prev_sib_page = page_cache.lock_page_mut(get_prev_sib(&page));
+                        set_next_sib(&mut prev_sib_page, new_page_pnum);
+                    }
                 } else {
                     set_not_leaf(&mut new_page);
                     set_not_leaf(&mut temp);
@@ -298,18 +305,73 @@ impl BTree {
         }
     }
 
-    pub fn delete(&self, key: &[u8], page_cache: &PageCache, _allocator: &mut PageAllocator) {
+    // Here be dragons. delete is one of the most complex functions, with tons of edge
+    // cases.
+    pub fn delete(&self, key: &[u8], page_cache: &PageCache, allocator: &mut PageAllocator) {
         let (path, found) = self.find_with_path(key, page_cache);
         if !found {
             println!("btree_delete: warning, key not found");
             return;
         }
 
-        let (leaf_pnum, index) = path.iter().last().unwrap();
-        let mut page = page_cache.lock_page_mut(*leaf_pnum);
-        delete_vararray_entry(&mut page, *index);
+        for (page_num, index) in path.iter().rev() {
+            let mut page = page_cache.lock_page_mut(*page_num);
+            let num_entries = get_num_vararray_entries(&page);
+            if !is_leaf(&page) && *index == num_entries {
+                // Need to remove right child. Remove it and set the next highest
+                // entry in the node to be the new right child (if possible)
+                if num_entries > 0 {
+                    let nu_right = PageNum(u64::from_le_bytes(get_entry_value(
+                        &page, num_entries - 1).try_into()
+                        .expect("value was not 8 bytes")));
+                    set_right_child(&mut page, nu_right);
+                    delete_vararray_entry(&mut page, num_entries - 1);
+                } else {
+                    set_right_child(&mut page, PageNum::INVALID);
+                }
 
-        // TODO: at this point we could walk back up the path freeing empty pages.
+                // Otherwise this node is truly empty. We will continue up
+                // the stack deleting.
+
+                if *page_num == self.root {
+                    // If the root is now empty, turn it back into a leaf.
+                    set_leaf(&mut page);
+                    break;
+                }
+            } else {
+                delete_vararray_entry(&mut page, *index);
+            }
+
+            if *page_num == self.root {
+                // Never free root.
+                return;
+            }
+
+            // Note here: if an interior node only has one entry, we could just
+            // propate its key up to its parent. It's a bit trickier when it is the
+            // right child, since we don't know the key here.
+            if get_num_vararray_entries(&page) != 0
+                || (!is_leaf(&page) && get_right_child(&page) != PageNum::INVALID) {
+                break; // Is not empty, we are done for now.
+            }
+
+            // This page ie empty. Delete the page itself, then the next loop
+            // iteration will remove its entry from its parent.
+            if is_leaf(&page) {
+                // Remove from the linked list
+                if get_prev_sib(&page) != PageNum::INVALID {
+                    let mut prev_page = page_cache.lock_page_mut(get_prev_sib(&page));
+                    set_next_sib(&mut prev_page, get_next_sib(&page));
+                }
+
+                if get_next_sib(&page) != PageNum::INVALID {
+                    let mut next_page = page_cache.lock_page_mut(get_next_sib(&page));
+                    set_prev_sib(&mut next_page, get_prev_sib(&page));
+                }
+            }
+
+            allocator.free(*page_num);
+        }
     }
 
     fn print(&self, page_cache: &PageCache) {
@@ -350,10 +412,15 @@ pub fn init_btree_node(page: &mut PageData) {
     page[0] = FLAG_LEAF;
     set_u64(page, HEADER_NEXT_SIB_OFFS, PageNum::INVALID.0);
     set_u64(page, HEADER_PREV_SIB_OFFS, PageNum::INVALID.0);
+    set_u64(page, HEADER_RIGHT_CHILD_OFFS, PageNum::INVALID.0);
 }
 
 fn is_leaf(page: &PageData) -> bool {
     (page[0] & FLAG_LEAF) != 0
+}
+
+fn set_leaf(page: &mut PageData) {
+    page[0] |= FLAG_LEAF;
 }
 
 fn set_not_leaf(page: &mut PageData) {
@@ -365,6 +432,7 @@ fn get_next_sib(page: &PageData) -> PageNum {
 }
 
 fn set_next_sib(page: &mut PageData, page_num: PageNum) {
+    assert!(page_num.0 != 0);
     set_u64(&mut page[..], HEADER_NEXT_SIB_OFFS, page_num.into());
 }
 
@@ -373,6 +441,7 @@ fn get_prev_sib(page: &PageData) -> PageNum {
 }
 
 fn set_prev_sib(page: &mut PageData, page_num: PageNum) {
+    assert!(page_num.0 != 0);
     set_u64(&mut page[..], HEADER_PREV_SIB_OFFS, page_num.into());
 }
 
@@ -381,6 +450,7 @@ fn get_right_child(page: &PageData) -> PageNum {
 }
 
 fn set_right_child(page: &mut PageData, page_num: PageNum) {
+    assert!(page_num.0 != 0);
     set_u64(&mut page[..], HEADER_RIGHT_CHILD_OFFS, page_num.into());
 }
 
@@ -753,9 +823,11 @@ mod tests {
         assert!(!is_leaf(&page));
     }
 
+    // The length of this key is important to ensure tests like
+    // delete_all create enough layers.
     fn gen_key_for_index(index: usize) -> Vec<u8> {
         let mut key = index.to_be_bytes().to_vec();
-        key.extend_from_slice(&[0u8].repeat(32));
+        key.extend_from_slice(&[0u8].repeat(256));
         key
     }
 
@@ -776,15 +848,13 @@ mod tests {
         (page_cache, allocator, tree)
     }
 
-    const NUM_TEST_ENTRIES: usize = 256;
-
-    fn populate_test_btree() -> (PageCache, PageAllocator, BTree) {
+    fn populate_test_btree(count: usize) -> (PageCache, PageAllocator, BTree) {
         let (page_cache, mut allocator, tree) = create_test_btree();
-        let _transaction = page_cache.begin_transaction();
 
-        let mut test_sequence: Vec<usize> = (0..NUM_TEST_ENTRIES).collect();
+        let mut test_sequence: Vec<usize> = (0..count).collect();
         test_sequence.shuffle(&mut SmallRng::seed_from_u64(0xc0fc47a65d406179));
         for i in test_sequence {
+            let _transaction = page_cache.begin_transaction();
             tree.insert(&gen_key_for_index(i), &(i as u64).to_le_bytes(), &page_cache, &mut allocator);
         }
 
@@ -793,7 +863,7 @@ mod tests {
 
     #[test]
     fn test_valid_btree_create() {
-        let (page_cache, _alloc, tree) = populate_test_btree();
+        let (page_cache, _alloc, tree) = populate_test_btree(256);
         let mut i = 0;
         for (key, val) in tree.iterate(false, &page_cache) {
             assert_eq!(key.as_slice(), gen_key_for_index(i));
@@ -805,7 +875,8 @@ mod tests {
 
     #[test]
     fn test_btree_backward_scan() {
-        let (page_cache, _alloc, tree) = populate_test_btree();
+        const NUM_TEST_ENTRIES: usize = 256;
+        let (page_cache, _alloc, tree) = populate_test_btree(NUM_TEST_ENTRIES);
 
         let mut cursor = tree.iterate(true, &page_cache);
         for i in (0..NUM_TEST_ENTRIES).rev() {
@@ -820,7 +891,7 @@ mod tests {
 
     #[test]
     fn test_btree_find() {
-        let (page_cache, _alloc, tree) = populate_test_btree();
+        let (page_cache, _alloc, tree) = populate_test_btree(256);
 
         const START_KEY_IDX: usize = 55;
         let mut cursor = tree.find(&gen_key_for_index(START_KEY_IDX), false, &page_cache);
@@ -835,7 +906,7 @@ mod tests {
     // Get the first page in the tree, which requires traversing the left child page.
     #[test]
     fn test_btree_find_begin() {
-        let (page_cache, _alloc, tree) = populate_test_btree();
+        let (page_cache, _alloc, tree) = populate_test_btree(256);
 
         let mut cursor = tree.find(&[0u8], false, &page_cache);
         let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
@@ -847,7 +918,7 @@ mod tests {
     // Key is before first key and going in reverse. Nothing to fetch.
     #[test]
     fn test_btree_reverse_find_begin() {
-        let (page_cache, _alloc, tree) = populate_test_btree();
+        let (page_cache, _alloc, tree) = populate_test_btree(256);
 
         let mut cursor = tree.find(&[0u8], true, &page_cache);
         assert_eq!(cursor.next(), None);
@@ -856,7 +927,7 @@ mod tests {
     // Key is after last key and going forward. Nothing to fetch.
     #[test]
     fn test_btree_find_past_end() {
-        let (page_cache, _alloc, tree) = populate_test_btree();
+        let (page_cache, _alloc, tree) = populate_test_btree(256);
 
         let mut cursor = tree.find(&[0xff; 255], false, &page_cache);
         assert_eq!(cursor.next(), None);
@@ -864,7 +935,8 @@ mod tests {
 
     #[test]
     fn test_btree_delete() {
-        let (page_cache, mut allocator, tree) = populate_test_btree();
+        const NUM_TEST_ENTRIES: usize = 256;
+        let (page_cache, mut allocator, tree) = populate_test_btree(NUM_TEST_ENTRIES);
 
         const INDEX_TO_DELETE: usize = 37;
         {
@@ -890,7 +962,8 @@ mod tests {
 
     #[test]
     fn test_btree_delete_not_present() {
-        let (page_cache, mut allocator, tree) = populate_test_btree();
+        const NUM_TEST_ENTRIES: usize = 256;
+        let (page_cache, mut allocator, tree) = populate_test_btree(NUM_TEST_ENTRIES);
 
         {
             let _transaction = page_cache.begin_transaction();
@@ -910,16 +983,28 @@ mod tests {
 
     #[test]
     fn test_btree_delete_all() {
-        let (page_cache, mut allocator, tree) = populate_test_btree();
+        // I've empirically verified this is large enough that there is a layer of internal
+        // nodes. That's improtant to catch edge cases.
+        const TEST_ENTRIES: usize = 2048;
+
+        let (page_cache, mut allocator, tree) = populate_test_btree(TEST_ENTRIES);
         {
-            let _transaction = page_cache.begin_transaction();
-            for i in 0..NUM_TEST_ENTRIES {
+            let mut delete_seq: Vec<usize> = (0..TEST_ENTRIES).collect();
+            delete_seq.shuffle(&mut SmallRng::seed_from_u64(0xc0fc47a65d406179));
+
+            for i in delete_seq {
+                let _transaction = page_cache.begin_transaction();
                 tree.delete(&gen_key_for_index(i), &page_cache, &mut allocator);
             }
         }
 
+        tree.print(&page_cache);
+
         let mut cursor = tree.iterate(false, &page_cache);
         assert_eq!(cursor.next(), None);
+
+        // Ensure we've reclaimed storage
+        assert!(allocator.total_allocs - allocator.total_frees < 2);
     }
 
     #[test]
@@ -932,7 +1017,7 @@ mod tests {
     // Just ensures it doesn't crash...
     #[test]
     fn test_print_btree() {
-        let (page_cache, _alloc, tree) = populate_test_btree();
+        let (page_cache, _alloc, tree) = populate_test_btree(256);
         tree.print(&page_cache);
     }
 
