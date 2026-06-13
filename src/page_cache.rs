@@ -48,8 +48,8 @@ impl From<PageIndex> for u64 {
 // This is the interface to the underlying storage, called by this module
 // to read and write pages.
 pub trait PersistentStore: Any {
-    fn read(&mut self, fpid: PageIndex, page: &mut PageData);
-    fn write(&mut self, fpid: PageIndex, page: &PageData);
+    fn read(&mut self, page_index: PageIndex, page: &mut PageData);
+    fn write(&mut self, page_index: PageIndex, page: &PageData);
     fn sync(&mut self);
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -58,7 +58,7 @@ pub trait PersistentStore: Any {
 // Metadata and underlying storage for cached data.
 #[derive(Debug, Clone)]
 struct CachedPage {
-    fpid: Option<PageIndex>, // Which disk block this is from
+    page_index: Option<PageIndex>, // Which disk block this is from
     ref_count: u32,
     dirty: bool, // This differs from what is on disk and need to be written.
     data: Box<PageData>
@@ -134,9 +134,9 @@ impl PageCache {
         }
     }
 
-    pub fn lock_page(&self, fpid: PageIndex) -> PageGuard {
+    pub fn lock_page(&self, page_index: PageIndex) -> PageGuard {
         let mut inner = self.inner.borrow_mut();
-        let cache_slot = inner.lock_page_internal(fpid, false);
+        let cache_slot = inner.lock_page_internal(page_index, false);
         let data: *const PageData = &*inner.pages[cache_slot].data;
         PageGuard {
             cache_slot,
@@ -147,9 +147,9 @@ impl PageCache {
 
     // If a page is locked mutable, it will be written back when
     // the transaction is complete.
-    pub fn lock_page_mut(&self, fpid: PageIndex) -> PageGuardMut {
+    pub fn lock_page_mut(&self, page_index: PageIndex) -> PageGuardMut {
         let mut inner = self.inner.borrow_mut();
-        let cache_slot = inner.lock_page_internal(fpid, true);
+        let cache_slot = inner.lock_page_internal(page_index, true);
         let data: *mut PageData = &mut *inner.pages[cache_slot].data;
 
         PageGuardMut {
@@ -193,7 +193,7 @@ impl PageCacheInner {
 
         PageCacheInner {
             page_map: HashMap::new(),
-            pages: vec![CachedPage{fpid: None, ref_count: 0, dirty: false, data: Box::new([0u8; PAGE_SIZE])}; size],
+            pages: vec![CachedPage{page_index: None, ref_count: 0, dirty: false, data: Box::new([0u8; PAGE_SIZE])}; size],
             lru,
             persistent_store: persistent_store.clone(),
             transaction_active: false,
@@ -202,12 +202,12 @@ impl PageCacheInner {
         }
     }
 
-    fn lock_page_internal(&mut self, fpid: PageIndex, writable: bool) -> usize {
+    fn lock_page_internal(&mut self, page_index: PageIndex, writable: bool) -> usize {
         assert!(!writable || self.transaction_active);
-        assert!(fpid.0 == 0 || fpid.0 > LOG_PAGES as u64,
+        assert!(page_index.0 == 0 || page_index.0 > LOG_PAGES as u64,
             "Attempt to lock page in write ahead log");
 
-        let entry = self.page_map.get(&fpid);
+        let entry = self.page_map.get(&page_index);
         match entry {
             Some(cache_slot) => {
                 // This page is already cached, return it.
@@ -234,17 +234,17 @@ impl PageCacheInner {
                         // The cache is write-through, so we never have dirty pages
                         // sitting around.
                         let cp = &mut self.pages[index];
-                        match cp.fpid {
-                            Some(fpid) => self.page_map.remove(&fpid),
+                        match cp.page_index {
+                            Some(page_index) => self.page_map.remove(&page_index),
                             None => None // this page has never been loaded, nothing to remove
                         };
-                        self.page_map.insert(fpid, index);
-                        cp.fpid = Some(fpid);
+                        self.page_map.insert(page_index, index);
+                        cp.page_index = Some(page_index);
                         cp.ref_count = 1;
                         cp.dirty = writable;
 
                         // Read data into page
-                        self.persistent_store.borrow_mut().read(fpid,
+                        self.persistent_store.borrow_mut().read(page_index,
                             &mut self.pages[index].data);
 
                         index
@@ -286,7 +286,7 @@ impl PageCacheInner {
         // Write to journal
         let pages: Vec<(PageIndex, PageData)> = self.dirty_page_list
             .into_iter()
-            .map(|index| (self.pages[index].fpid.unwrap(), *self.pages[index].data))
+            .map(|index| (self.pages[index].page_index.unwrap(), *self.pages[index].data))
             .collect();
 
         self.write_ahead_log.log_transaction(&pages);
@@ -296,7 +296,7 @@ impl PageCacheInner {
         while !self.dirty_page_list.empty() {
             let index = self.dirty_page_list.pop_tail().unwrap();
             let cached_page = &mut self.pages[index];
-            self.persistent_store.borrow_mut().write(cached_page.fpid.unwrap(), &self.pages[index].data);
+            self.persistent_store.borrow_mut().write(cached_page.page_index.unwrap(), &self.pages[index].data);
             self.pages[index].dirty = false;
             self.lru.push_head(index);
         }
@@ -536,17 +536,17 @@ mod tests {
             // Lock up to 5 pages.
             for _ in 0..rng.random_range(1..5) {
                 // Note the same file page may be locked multiple times (3.33% chance)
-                let fpid = rng.random_range(LOG_PAGES + 1..TOTAL_PAGES + LOG_PAGES + 1);
+                let page_index = rng.random_range(LOG_PAGES + 1..TOTAL_PAGES + LOG_PAGES + 1);
                 // Randomly decide if to lock for read or write
                 if rng.random_bool(0.5) {
-                    let mut guard = page_cache.lock_page_mut(PageIndex(fpid as u64));
-                    assert_eq!(*guard, oracle[fpid]);
-                    rng.fill(&mut oracle[fpid]);
-                    guard.copy_from_slice(oracle[fpid].as_slice());
+                    let mut guard = page_cache.lock_page_mut(PageIndex(page_index as u64));
+                    assert_eq!(*guard, oracle[page_index]);
+                    rng.fill(&mut oracle[page_index]);
+                    guard.copy_from_slice(oracle[page_index].as_slice());
                     mut_guards.push(guard);
                 } else {
-                    let guard = page_cache.lock_page(PageIndex(fpid as u64));
-                    assert_eq!(*guard, oracle[fpid]);
+                    let guard = page_cache.lock_page(PageIndex(page_index as u64));
+                    assert_eq!(*guard, oracle[page_index]);
                     guards.push(guard);
                 }
             }
@@ -555,9 +555,9 @@ mod tests {
         }
 
         // Check all pages
-        for fpid in LOG_PAGES + 1..LOG_PAGES + 1 + TOTAL_PAGES {
-            let guard = page_cache.lock_page(PageIndex(fpid as u64));
-            assert_eq!(*guard, oracle[fpid]);
+        for page_index in LOG_PAGES + 1..LOG_PAGES + 1 + TOTAL_PAGES {
+            let guard = page_cache.lock_page(PageIndex(page_index as u64));
+            assert_eq!(*guard, oracle[page_index]);
         }
     }
 }

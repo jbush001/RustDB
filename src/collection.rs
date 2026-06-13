@@ -131,19 +131,19 @@ impl Collection {
             set_u64(&mut pointer, 1, content.len() as u64 - 1);
 
             let mut offset = 1; // Skip the flag byte we speculatively added
-            let mut fpid = page_allocator.alloc();
-            set_u64(&mut pointer, 9, fpid.into());
+            let mut page_index = page_allocator.alloc();
+            set_u64(&mut pointer, 9, page_index.into());
             while offset < content.len() {
-                let mut page = page_cache.lock_page_mut(fpid);
+                let mut page = page_cache.lock_page_mut(page_index);
                 let to_copy = std::cmp::min(content.len() - offset, PAGE_SIZE - 8);
                 page[8..8 + to_copy].copy_from_slice(&content[offset..offset + to_copy]);
-                fpid = if offset + to_copy < content.len() {
+                page_index = if offset + to_copy < content.len() {
                     page_allocator.alloc()
                 } else {
                     PageIndex::INVALID
                 };
 
-                set_u64(&mut page[..], 0, fpid.into());
+                set_u64(&mut page[..], 0, page_index.into());
                 offset += to_copy;
             }
 
@@ -1236,8 +1236,8 @@ mod tests {
 
         // XXX hack: allocate and free the page, which will tell us where the
         // pages will be placed.
-        let fpid = allocator.alloc();
-        allocator.free(fpid);
+        let page_index = allocator.alloc();
+        allocator.free(page_index);
 
         // Create a large document
         let large_value = "x".repeat(0x4000);
@@ -1246,7 +1246,7 @@ mod tests {
 
         // XXX hack hard coded page address
         {
-            let mut page = page_cache.lock_page_mut(PageIndex(fpid.0 + 1));
+            let mut page = page_cache.lock_page_mut(PageIndex(page_index.0 + 1));
             set_u64(&mut page[..], 0, PageIndex::INVALID.0);
         }
 

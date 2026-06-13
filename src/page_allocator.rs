@@ -73,13 +73,13 @@ impl PageAllocator {
         }
     }
 
-    pub fn free(&mut self, fpid: PageIndex) {
-        assert!(fpid.0 >= LOG_PAGES as u64 + 2);
+    pub fn free(&mut self, page_index: PageIndex) {
+        assert!(page_index.0 >= LOG_PAGES as u64 + 2);
 
         {
-            let mut page = self.page_cache.lock_page_mut(fpid);
+            let mut page = self.page_cache.lock_page_mut(page_index);
             set_u64(&mut page[..], 0, self.free_list_head.0);
-            self.free_list_head = fpid;
+            self.free_list_head = page_index;
         }
 
         let mut page = self.page_cache.lock_page_mut(SUPERBLOCK_FPID);

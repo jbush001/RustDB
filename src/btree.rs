@@ -14,9 +14,15 @@
 //   limitations under the License.
 //
 
-// This is a B+ tree implementation. Values are only stored in the leaf nodes.
+// The BTree is an efficient key-value store that supports O(log n) lookup
+// and ordered iteration. It is the base storage mechanism for all structured
+// data. This implementation is variant called a B+ tree, distinguished by the
+// fact that values are only stored in the leaf nodes. Keys must be unique in
+// the BTree.
+//
 // The BTree is structured so that the root node file ID never changes even if
 // it is split. The upper layers depend on this.
+//
 // Each entry is:
 // key_length: u16
 // key: variable length
@@ -310,10 +316,10 @@ impl BTree {
         let mut fifo: Vec<PageIndex> = Vec::new();
         fifo.push(self.root);
         while !fifo.is_empty() {
-            let fpid = fifo.remove(0);
-            let page = page_cache.lock_page(fpid);
-            println!("Node fpid {:?} is_leaf {} prev_sib {} next_sib {} right_child {}",
-                fpid, is_leaf(&page), get_prev_sib(&page).0, get_next_sib(&page).0, get_right_child(&page).0);
+            let page_index = fifo.remove(0);
+            let page = page_cache.lock_page(page_index);
+            println!("Node page_index {:?} is_leaf {} prev_sib {} next_sib {} right_child {}",
+                page_index, is_leaf(&page), get_prev_sib(&page).0, get_next_sib(&page).0, get_right_child(&page).0);
 
             if is_leaf(&page) {
                 for i in 0..get_num_vararray_entries(&page) {
@@ -358,24 +364,24 @@ fn get_next_sib(page: &PageData) -> PageIndex {
     PageIndex(get_u64(page, HEADER_NEXT_SIB_OFFS))
 }
 
-fn set_next_sib(page: &mut PageData, fpid: PageIndex) {
-    set_u64(&mut page[..], HEADER_NEXT_SIB_OFFS, fpid.into());
+fn set_next_sib(page: &mut PageData, page_index: PageIndex) {
+    set_u64(&mut page[..], HEADER_NEXT_SIB_OFFS, page_index.into());
 }
 
 fn get_prev_sib(page: &PageData) -> PageIndex {
     PageIndex(get_u64(page, HEADER_PREV_SIB_OFFS))
 }
 
-fn set_prev_sib(page: &mut PageData, fpid: PageIndex) {
-    set_u64(&mut page[..], HEADER_PREV_SIB_OFFS, fpid.into());
+fn set_prev_sib(page: &mut PageData, page_index: PageIndex) {
+    set_u64(&mut page[..], HEADER_PREV_SIB_OFFS, page_index.into());
 }
 
 fn get_right_child(page: &PageData) -> PageIndex {
     PageIndex(get_u64(page, HEADER_RIGHT_CHILD_OFFS))
 }
 
-fn set_right_child(page: &mut PageData, fpid: PageIndex) {
-    set_u64(&mut page[..], HEADER_RIGHT_CHILD_OFFS, fpid.into());
+fn set_right_child(page: &mut PageData, page_index: PageIndex) {
+    set_u64(&mut page[..], HEADER_RIGHT_CHILD_OFFS, page_index.into());
 }
 
 fn get_entry_size(key: &[u8], value: &[u8]) -> usize {
@@ -451,8 +457,8 @@ fn append_entry(page: &mut PageData, key: &[u8], value: &[u8]) -> usize {
 
 // Split a single page into two new ones.
 // Returns the separator key.
-// NOTE: you must set the right_sibling in the returned out2 to the fpid of out1
-// (we don't know it here)
+// NOTE: The caller must set the right_sibling in the returned out2 to the
+// page_index of out1 (we don't know it here)
 fn split_node(orig: &PageData, out1: &mut PageData, out2: &mut PageData) -> Vec<u8> {
     init_btree_node(out1);
     init_btree_node(out2);

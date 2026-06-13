@@ -44,15 +44,15 @@ impl MockPersistentStore {
 }
 
 impl PersistentStore for MockPersistentStore {
-    fn read(&mut self, fpid: PageIndex, page: &mut PageData) {
-        if self.saved_pages.contains_key(&fpid) {
-            page.copy_from_slice(self.saved_pages.get(&fpid).unwrap().as_slice());
+    fn read(&mut self, page_index: PageIndex, page: &mut PageData) {
+        if self.saved_pages.contains_key(&page_index) {
+            page.copy_from_slice(self.saved_pages.get(&page_index).unwrap().as_slice());
         } else {
             page.fill(0);
         }
     }
 
-    fn write(&mut self, fpid: PageIndex, page: &PageData) {
+    fn write(&mut self, page_index: PageIndex, page: &PageData) {
         if self.write_limit != usize::MAX && self.write_limit > 0 {
             self.write_limit -= 1;
         }
@@ -61,7 +61,7 @@ impl PersistentStore for MockPersistentStore {
             return;
         }
 
-        self.saved_pages.insert(fpid, *page);
+        self.saved_pages.insert(page_index, *page);
     }
 
     fn sync(&mut self) {

@@ -43,20 +43,20 @@ impl FileStore {
 }
 
 impl PersistentStore for FileStore {
-    fn read(&mut self, fpid: PageIndex, page: &mut PageData) {
-        if fpid >= self.length {
+    fn read(&mut self, page_index: PageIndex, page: &mut PageData) {
+        if page_index >= self.length {
             page.fill(0);
             return;
         }
 
-        self.file.seek(SeekFrom::Start(fpid.0 * PAGE_SIZE as u64)).expect("seek failed");
+        self.file.seek(SeekFrom::Start(page_index.0 * PAGE_SIZE as u64)).expect("seek failed");
         self.file.read_exact(page).expect("read failed");
     }
 
-    fn write(&mut self, fpid: PageIndex, page: &PageData) {
-        self.file.seek(SeekFrom::Start(fpid.0 * PAGE_SIZE as u64)).expect("seek failed");
+    fn write(&mut self, page_index: PageIndex, page: &PageData) {
+        self.file.seek(SeekFrom::Start(page_index.0 * PAGE_SIZE as u64)).expect("seek failed");
         self.file.write_all(page).expect("write failed");
-        self.length = std::cmp::max(self.length, PageIndex(fpid.0 + 1));
+        self.length = std::cmp::max(self.length, PageIndex(page_index.0 + 1));
     }
 
     fn sync(&mut self) {

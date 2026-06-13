@@ -174,11 +174,11 @@ impl WriteAheadLog {
 
     pub fn log_transaction(&mut self, pages: &Vec<(PageIndex, PageData)>) {
         // Write all transaction blocks to log.
-        for (fpid, block_data) in pages {
+        for (page_index, block_data) in pages {
             // Update the block data structure
             let offset = LH_PAGE_HDRS_OFFS + self.head * PAGE_HEADER_SIZE;
             set_u32(&mut self.header_data, offset, self.next_transaction_id);
-            set_u64(&mut self.header_data, offset + PH_FPID_OFFS, (*fpid).into());
+            set_u64(&mut self.header_data, offset + PH_FPID_OFFS, (*page_index).into());
 
             // Write the block data itself to the log.
             let write_fpid = PageIndex(self.log_start.0
@@ -347,8 +347,8 @@ mod tests {
                 let pages: Vec<(PageIndex, PageData)> = block_offsets.into_iter().map(|offset| {
                     let mut data: PageData = [0; PAGE_SIZE];
                     rng.fill(&mut data);
-                    let fpid = PageIndex((START_OF_DATA + offset) as u64);
-                    (fpid, data)
+                    let page_index = PageIndex((START_OF_DATA + offset) as u64);
+                    (page_index, data)
                 }).collect();
                 log.log_transaction(&pages);
 
@@ -357,12 +357,12 @@ mod tests {
                     continue;
                 }
 
-                for (fpid, data) in &pages {
-                    oracle[fpid.0 as usize] = *data;
+                for (page_index, data) in &pages {
+                    oracle[page_index.0 as usize] = *data;
                 }
 
-                for (fpid, data) in pages {
-                    mock_io.borrow_mut().write(fpid, &data);
+                for (page_index, data) in pages {
+                    mock_io.borrow_mut().write(page_index, &data);
                 }
 
                 log.blocks_written();
