@@ -20,7 +20,8 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 enum Operation {
     Gt, Gte, Lt, Lte, Eq, Neq,
-    And, Or
+    And, Or,
+    In, NotIn
 }
 
 impl std::fmt::Display for Operation {
@@ -33,7 +34,9 @@ impl std::fmt::Display for Operation {
             Operation::Eq => write!(f, "=")?,
             Operation::Neq => write!(f, "<>")?,
             Operation::And => write!(f, "and")?,
-            Operation::Or => write!(f, "or")?
+            Operation::Or => write!(f, "or")?,
+            Operation::In => write!(f, "in")?,
+            Operation::NotIn => write!(f, "not in")?
         }
 
         Ok(())
@@ -85,25 +88,49 @@ impl ExpressionNode {
             ExpressionNode::Constant(val) => Ok(val.clone()),
             ExpressionNode::Path(path) => lookup_field(path, document),
             ExpressionNode::BinaryOp((operation, left, right)) => {
-                // Comparisons must obey the same ordering as the btree encoding, so we
-                // encoded them the same with a dummmy docid. This means we will not
-                // coerce values for comparison.
-                let encoded_left = encode_key(&left.eval(document)?, DocId(0))?;
-                let encoded_right = encode_key(&right.eval(document)?, DocId(0))?;
-                match operation {
-                    Operation::Gt => Ok(Value::Bool(encoded_left > encoded_right)),
-                    Operation::Gte => Ok(Value::Bool(encoded_left >= encoded_right)),
-                    Operation::Lt => Ok(Value::Bool(encoded_left < encoded_right)),
-                    Operation::Lte => Ok(Value::Bool(encoded_left <= encoded_right)),
-                    Operation::Eq => Ok(Value::Bool(encoded_left == encoded_right)),
-                    Operation::Neq => Ok(Value::Bool(encoded_left != encoded_right)),
-                    Operation::And => {
-                        Ok(Value::Bool(cast_to_bool(&left.eval(document)?)
-                            && cast_to_bool(&right.eval(document)?)))
-                    },
-                    Operation::Or => {
-                        Ok(Value::Bool(cast_to_bool(&left.eval(document)?)
-                            || cast_to_bool(&right.eval(document)?)))
+                let left_val = left.eval(document)?;
+                let right_val = right.eval(document)?;
+
+                if matches!(operation, Operation::In) || matches!(operation, Operation::NotIn) {
+                    if let Value::Array(items) = right_val {
+                        for item in items {
+                            if item == left_val {
+                                return Ok(Value::Bool(matches!(operation, Operation::In)));
+                            }
+                        }
+
+                        Ok(Value::Bool(matches!(operation, Operation::NotIn)))
+                    } else {
+                        Err("RHS of in expression must be an array".to_string())
+                    }
+                } else {
+                    // Comparisons must obey the same ordering as the btree encoding, so we
+                    // encoded them the same with a dummmy docid. This means we will not
+                    // coerce values for comparison.
+                    if left_val.is_null() || right_val.is_null() {
+                        // Always return true for comparisons where value is null.
+                        return Ok(Value::Bool(true));
+                    }
+
+                    let encoded_left = encode_key(&left_val, DocId(0))?;
+                    let encoded_right = encode_key(&right_val, DocId(0))?;
+                    match operation {
+                        Operation::Gt => Ok(Value::Bool(encoded_left > encoded_right)),
+                        Operation::Gte => Ok(Value::Bool(encoded_left >= encoded_right)),
+                        Operation::Lt => Ok(Value::Bool(encoded_left < encoded_right)),
+                        Operation::Lte => Ok(Value::Bool(encoded_left <= encoded_right)),
+                        Operation::Eq => Ok(Value::Bool(encoded_left == encoded_right)),
+                        Operation::Neq => Ok(Value::Bool(encoded_left != encoded_right)),
+                        Operation::And => {
+                            Ok(Value::Bool(cast_to_bool(&left.eval(document)?)
+                                && cast_to_bool(&right.eval(document)?)))
+                        },
+                        Operation::Or => {
+                            Ok(Value::Bool(cast_to_bool(&left.eval(document)?)
+                                || cast_to_bool(&right.eval(document)?)))
+                        },
+
+                        _ => { unreachable!(); }
                     }
                 }
             }
@@ -267,6 +294,15 @@ mod tests {
             Box::new(ExpressionNode::Path(FieldPath::new("frob").expect("error creating field path"))),
             Box::new(ExpressionNode::Constant(json!(9)))))),
             "(frob = 9)");
+
+        assert_eq!(format!("{}", ExpressionNode::BinaryOp((Operation::In,
+            Box::new(ExpressionNode::Path(FieldPath::new("frob").expect("error creating field path"))),
+            Box::new(ExpressionNode::Constant(json!(["a", "b", "c", "d", "e"])))))),
+            r#"(frob in ["a","b","c","d","e"])"#);
+        assert_eq!(format!("{}", ExpressionNode::BinaryOp((Operation::NotIn,
+            Box::new(ExpressionNode::Path(FieldPath::new("frob").expect("error creating field path"))),
+            Box::new(ExpressionNode::Constant(json!([1,2,3,4,5])))))),
+            "(frob not in [1,2,3,4,5])");
     }
 
     #[test]
@@ -370,6 +406,18 @@ mod tests {
             (Operation::Gt, json!(100), json!(false), true),
             (Operation::Gt, json!(3.14), json!(100), true),
             (Operation::Gt, json!("abcd"), json!(3.14), true),
+
+            // Null (always returns true)
+            (Operation::Lt, Value::Null, json!(3), true),
+            (Operation::Lt, json!(3), Value::Null, true),
+            (Operation::Lte, Value::Null, json!(3), true),
+            (Operation::Lte, json!(3), Value::Null, true),
+            (Operation::Gt, Value::Null, json!(3), true),
+            (Operation::Gte, json!(3), Value::Null, true),
+            (Operation::Eq, Value::Null, json!(3), true),
+            (Operation::Eq, json!(3), Value::Null, true),
+            (Operation::Neq, Value::Null, json!(3), true),
+            (Operation::Neq, json!(3), Value::Null, true)
         ];
 
         for (operation, operand1, operand2, expected) in ops {
@@ -382,6 +430,59 @@ mod tests {
             assert_eq!(expr.eval(&json!({})).unwrap(), Value::Bool(expected),
                 "compare failed {:?} {:?} {:?}", operation.clone(), operand1.clone(), operand2.clone());
         }
+    }
 
+    #[test]
+    fn test_in_not_in() {
+        let expr = ExpressionNode::BinaryOp((
+            Operation::In,
+            Box::new(ExpressionNode::Constant(json!(3))),
+            Box::new(ExpressionNode::Constant(json!([1, 3, 5, 7, 9])))
+        ));
+
+        assert_eq!(expr.eval(&json!({})).unwrap(), Value::Bool(true));
+
+        let expr = ExpressionNode::BinaryOp((
+            Operation::In,
+            Box::new(ExpressionNode::Constant(json!(4))),
+            Box::new(ExpressionNode::Constant(json!([1, 3, 5, 7, 9])))
+        ));
+
+        assert_eq!(expr.eval(&json!({})).unwrap(), Value::Bool(false));
+
+        let expr = ExpressionNode::BinaryOp((
+            Operation::NotIn,
+            Box::new(ExpressionNode::Constant(json!(3))),
+            Box::new(ExpressionNode::Constant(json!([1, 3, 5, 7, 9])))
+        ));
+
+        assert_eq!(expr.eval(&json!({})).unwrap(), Value::Bool(false));
+
+        let expr = ExpressionNode::BinaryOp((
+            Operation::NotIn,
+            Box::new(ExpressionNode::Constant(json!(4))),
+            Box::new(ExpressionNode::Constant(json!([1, 3, 5, 7, 9])))
+        ));
+
+        assert_eq!(expr.eval(&json!({})).unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_in_not_in_bad_param() {
+        let expr = ExpressionNode::BinaryOp((
+            Operation::In,
+            Box::new(ExpressionNode::Constant(json!(3))),
+            Box::new(ExpressionNode::Constant(json!(12)))
+        ));
+
+        assert_eq!(expr.eval(&json!({})).unwrap_err(), "RHS of in expression must be an array".to_string());
+
+        let expr = ExpressionNode::BinaryOp((
+            Operation::NotIn,
+            Box::new(ExpressionNode::Constant(json!(3))),
+            Box::new(ExpressionNode::Constant(json!({"foo": 3})))
+        ));
+
+        assert_eq!(expr.eval(&json!({})).unwrap_err(), "RHS of in expression must be an array".to_string());
     }
 }
