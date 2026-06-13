@@ -45,7 +45,7 @@ impl Database {
         // A bit of a hack: we know the first page that will be allocated is just
         // after the journal, so hard code it here.
         let meta_collection = Collection::open(
-            &json!({"indices": [], "root_page_fpid": META_COLLECTION_FPID.0, "name": "_meta"}));
+            &json!({"indices": [], "root_page_pidx": META_COLLECTION_FPID.0, "name": "_meta"}));
         let mut collections = HashMap::new();
         let iter = SequentialScan::new(&meta_collection, &page_cache);
         for (docid, document) in iter {

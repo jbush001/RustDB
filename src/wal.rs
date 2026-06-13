@@ -151,12 +151,12 @@ impl WriteAheadLog {
             for _ in 0..count {
                 let mut block: PageData = [0; PAGE_SIZE];
                 // Copy from log to file area
-                let read_fpid = PageIndex(self.log_start.0
+                let read_pidx = PageIndex(self.log_start.0
                     + HEADER_BLOCKS as u64 + cur as u64);
-                store.read(read_fpid, &mut block);
-                let write_fpid = PageIndex(get_u64(&self.header_data,
+                store.read(read_pidx, &mut block);
+                let write_pidx = PageIndex(get_u64(&self.header_data,
                     LH_PAGE_HDRS_OFFS + cur * PAGE_HEADER_SIZE + PH_FPID_OFFS));
-                store.write(write_fpid, &block);
+                store.write(write_pidx, &block);
 
                 if cur == self.num_log_blocks - 1 {
                     cur = 0;
@@ -181,9 +181,9 @@ impl WriteAheadLog {
             set_u64(&mut self.header_data, offset + PH_FPID_OFFS, (*page_index).into());
 
             // Write the block data itself to the log.
-            let write_fpid = PageIndex(self.log_start.0
+            let write_pidx = PageIndex(self.log_start.0
                 + HEADER_BLOCKS as u64 + self.head as u64);
-            self.backing_store.borrow_mut().write(write_fpid, block_data);
+            self.backing_store.borrow_mut().write(write_pidx, block_data);
             self.head = (self.head + 1) % self.num_log_blocks;
         }
 
