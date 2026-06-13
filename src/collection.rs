@@ -19,6 +19,9 @@
 // indexed by a unique 64-bit identifier (the DocId). There are ancilary BTrees
 // for any indices fields within these documents to allow fast sorting and
 // searching.
+// If a document is too large to fit in the BTree node, this will allocate
+// A linked list of external pages to store the data. This allows arbitrarily
+/// large records.
 
 // TODO: when this detects database corruption, it currently panics. Decide
 // how to handle this.
@@ -585,7 +588,7 @@ mod tests {
 
     fn create_collection() -> (PageCache, PageAllocator, Collection) {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
-        let mut page_cache = PageCache::new(10, Rc::clone(&mock_io));
+        let mut page_cache = PageCache::new(25, Rc::clone(&mock_io));
         let _transaction = page_cache.begin_transaction();
         {
             let mut page = page_cache.lock_page_mut(SUPERBLOCK_FPID);
@@ -1205,12 +1208,12 @@ mod tests {
     }
 
     #[test]
-    fn test_overflow() {
+    fn test_overflow_pages() {
         let (mut page_cache, mut allocator, mut collection) = create_collection();
         let _transaction = page_cache.begin_transaction();
 
-        // Create a large document
-        let large_value = "x".repeat(0x4000);
+        // Create a large document (>128k)
+        let large_value = "x".repeat(0x20000);
         let doc = json!({"foo": large_value});
         let docid = collection.insert(&doc, &mut page_cache, &mut allocator);
 
@@ -1221,11 +1224,14 @@ mod tests {
         assert_eq!(docid, got_docid);
         assert_eq!(got_doc["foo"].as_str().unwrap(), large_value);
 
-        // Delete the document, ensure pages are freed
+        // Delete the document
         collection.delete(docid, &mut page_cache, &mut allocator);
 
         let mut iter = SequentialScan::new(&collection, &page_cache);
         assert!(iter.next().is_none());
+
+        // Ensure we've reclaimed storage (the root page will remain)
+        assert!(allocator.total_allocs - allocator.total_frees < 2);
     }
 
     #[test]
