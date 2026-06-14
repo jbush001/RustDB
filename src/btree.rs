@@ -53,45 +53,35 @@ impl Iterator for BTreeCursor {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Check if we need to go to the next page or skip empty pages.
-        let page = loop {
-            if self.current_node_pnum == PageNum::INVALID {
-                return None
-            }
+        if self.current_node_pnum == PageNum::INVALID {
+            return None;
+        }
 
-            let page = self.page_cache.lock_page(self.current_node_pnum);
+        let page = self.page_cache.lock_page(self.current_node_pnum);
+        let result = (
+            get_entry_key(&page, self.current_index).to_vec(),
+            get_entry_value(&page, self.current_index).to_vec()
+        );
 
-            if self.reverse {
-                if get_num_vararray_entries(&page) > 0 && self.current_index != usize::MAX {
-                    break page;
-                }
-
+        if self.reverse {
+            if self.current_index == 0 {
                 self.current_node_pnum = get_prev_sib(&page);
                 if self.current_node_pnum != PageNum::INVALID {
                     let page = self.page_cache.lock_page(self.current_node_pnum);
                     self.current_index = get_num_vararray_entries(&page) - 1;
                 }
-            } else if self.current_index >= get_num_vararray_entries(&page) {
-                self.current_node_pnum = get_next_sib(&page);
-                self.current_index = 0;
-            } else {
-                break page;
-            }
-        };
-
-        let entry = (get_entry_key(&page, self.current_index).to_vec(),
-            get_entry_value(&page, self.current_index).to_vec());
-        if self.reverse {
-            if self.current_index == 0 {
-                self.current_index = usize::MAX; // Indicate we need to fetch the next page
             } else {
                 self.current_index -= 1;
             }
         } else {
             self.current_index += 1;
+            if self.current_index >= get_num_vararray_entries(&page) {
+                self.current_node_pnum = get_next_sib(&page);
+                self.current_index = 0;
+            }
         }
 
-        Some(entry)
+        Some(result)
     }
 }
 
@@ -128,6 +118,18 @@ impl BTree {
             let page = page_cache.lock_page(current_node_pnum);
             if is_leaf(&page) {
                 let num_entries = get_num_vararray_entries(&page);
+                if num_entries == 0 {
+                    // Empty tree
+                    assert!(current_node_pnum == self.root, "Empty page in tree");
+                    // Return a dummy cursor
+                    return BTreeCursor {
+                        current_node_pnum: PageNum::INVALID,
+                        current_index: 0,
+                        reverse: false,
+                        page_cache: page_cache.clone()
+                    };
+                }
+
                 return BTreeCursor {
                     current_node_pnum,
                     current_index: if reverse && num_entries > 0 { num_entries - 1 } else { 0 },
