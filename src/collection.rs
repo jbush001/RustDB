@@ -21,7 +21,7 @@
 // searching.
 // If a document is too large to fit in the BTree node, this will allocate
 // A linked list of external pages to store the data. This allows arbitrarily
-/// large records.
+// large records.
 
 // TODO: when this detects database corruption, it currently panics. Decide
 // how to handle this.

@@ -127,9 +127,10 @@ impl BTree {
         loop {
             let page = page_cache.lock_page(current_node_pnum);
             if is_leaf(&page) {
+                let num_entries = get_num_vararray_entries(&page);
                 return BTreeCursor {
                     current_node_pnum,
-                    current_index: if reverse { get_num_vararray_entries(&page) - 1 } else { 0 },
+                    current_index: if reverse && num_entries > 0 { num_entries - 1 } else { 0 },
                     reverse,
                     page_cache: page_cache.clone()
                 }
@@ -410,9 +411,9 @@ impl BTree {
 pub fn init_btree_node(page: &mut PageData) {
     init_vararray(page);
     page[0] = FLAG_LEAF;
-    set_u64(page, HEADER_NEXT_SIB_OFFS, PageNum::INVALID.0);
-    set_u64(page, HEADER_PREV_SIB_OFFS, PageNum::INVALID.0);
-    set_u64(page, HEADER_RIGHT_CHILD_OFFS, PageNum::INVALID.0);
+    set_next_sib(page, PageNum::INVALID);
+    set_prev_sib(page, PageNum::INVALID);
+    set_right_child(page, PageNum::INVALID);
 }
 
 fn is_leaf(page: &PageData) -> bool {
@@ -1008,9 +1009,16 @@ mod tests {
     }
 
     #[test]
-    fn iterate_empty() {
+    fn test_iterate_empty() {
         let (page_cache, mut _allocator, tree) = create_test_btree();
         let mut cursor = tree.iterate(false, &page_cache);
+        assert_eq!(cursor.next(), None);
+    }
+
+    #[test]
+    fn test_reverse_iterate_empty() {
+        let (page_cache, mut _allocator, tree) = create_test_btree();
+        let mut cursor = tree.iterate(true, &page_cache);
         assert_eq!(cursor.next(), None);
     }
 
