@@ -41,8 +41,8 @@ impl PageAllocator {
         let page_cache = page_cache.clone();
         PageAllocator {
             page_cache,
-            next_frontier: PageNum(superblock.file_size),
-            free_list_head: PageNum::from_disk(superblock.free_list_head),
+            next_frontier: PageNum::from_u64(superblock.file_size),
+            free_list_head: PageNum::from_encoded(superblock.free_list_head),
             total_allocs: 0,
             total_frees: 0
         }
@@ -54,44 +54,44 @@ impl PageAllocator {
         if let Some(page_num) = self.free_list_head {
             {
                 let page = self.page_cache.lock_page(page_num);
-                self.free_list_head = PageNum::from_disk(get_u64(&page[..], 0));
+                self.free_list_head = PageNum::from_encoded(get_u64(&page[..], 0));
             }
 
             let mut page = self.page_cache.lock_page_mut(SUPERBLOCK_FPID);
             let superblock = get_superblock_mut(&mut page);
-            superblock.free_list_head = PageNum::to_disk(self.free_list_head);
+            superblock.free_list_head = self.free_list_head.to_encoded();
 
-            assert!(page_num.0 >= LOG_PAGES as u64 + 2);
+            assert!(page_num.as_u64() >= LOG_PAGES as u64 + 2);
 
             page_num
         } else {
             // Carve off frontier
             let page_num = self.next_frontier;
-            self.next_frontier.0 += 1;
+            self.next_frontier = PageNum::from_u64(self.next_frontier.as_u64() + 1);
             let mut page = self.page_cache.lock_page_mut(SUPERBLOCK_FPID);
             let superblock = get_superblock_mut(&mut page);
-            superblock.file_size = self.next_frontier.0;
+            superblock.file_size = self.next_frontier.as_u64();
 
-            assert!(page_num.0 >= LOG_PAGES as u64 + 2);
+            assert!(page_num.as_u64() >= LOG_PAGES as u64 + 2);
 
             page_num
         }
     }
 
     pub fn free(&mut self, page_num: PageNum) {
-        assert!(page_num.0 >= LOG_PAGES as u64 + 2);
+        assert!(page_num.as_u64() >= LOG_PAGES as u64 + 2);
 
         self.total_frees += 1;
 
         {
             let mut page = self.page_cache.lock_page_mut(page_num);
-            set_u64(&mut page[..], 0, PageNum::to_disk(self.free_list_head));
+            set_u64(&mut page[..], 0, self.free_list_head.to_encoded());
             self.free_list_head = Some(page_num);
         }
 
         let mut page = self.page_cache.lock_page_mut(SUPERBLOCK_FPID);
         let superblock = get_superblock_mut(&mut page);
-        superblock.free_list_head = PageNum::to_disk(self.free_list_head);
+        superblock.free_list_head = self.free_list_head.to_encoded();
     }
 }
 
@@ -130,7 +130,7 @@ mod tests {
 
         // Should come from the frontier
         let p4 = allocator.alloc();
-        assert_gt!(p4.0, p1.0);
+        assert_gt!(p4.as_u64(), p1.as_u64());
     }
 
     #[test]

@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 const PAGE_CACHE_SIZE: usize = 128;
-const META_COLLECTION_FPID: PageNum = PageNum(LOG_PAGES as u64 + 1);
+const META_COLLECTION_FPID: PageNum = PageNum::from_u64(LOG_PAGES as u64 + 1);
 
 pub struct Database {
     meta_collection: Collection,  // On-disk storage of collection metadata
@@ -45,7 +45,7 @@ impl Database {
         // A bit of a hack: we know the first page that will be allocated is just
         // after the journal, so hard code it here.
         let meta_collection = Collection::open(
-            &json!({"indices": [], "root_page_pnum": META_COLLECTION_FPID.0, "name": "_meta"}));
+            &json!({"indices": [], "root_page_pnum": META_COLLECTION_FPID.as_u64(), "name": "_meta"}));
         let mut collections = HashMap::new();
         let iter = SequentialScan::new(&meta_collection, &page_cache);
         for (docid, document) in iter {

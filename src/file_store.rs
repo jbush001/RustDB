@@ -33,7 +33,7 @@ impl FileStore {
             .create(true)
             .truncate(false)
             .open(path)?;
-        let length = PageNum(file.metadata().unwrap().len() / PAGE_SIZE as u64);
+        let length = PageNum::from_u64(file.metadata().unwrap().len() / PAGE_SIZE as u64);
 
         Ok(Self {
             file,
@@ -49,14 +49,14 @@ impl PersistentStore for FileStore {
             return;
         }
 
-        self.file.seek(SeekFrom::Start(page_num.0 * PAGE_SIZE as u64)).expect("seek failed");
+        self.file.seek(SeekFrom::Start(page_num.as_u64() * PAGE_SIZE as u64)).expect("seek failed");
         self.file.read_exact(page).expect("read failed");
     }
 
     fn write(&mut self, page_num: PageNum, page: &PageData) {
-        self.file.seek(SeekFrom::Start(page_num.0 * PAGE_SIZE as u64)).expect("seek failed");
+        self.file.seek(SeekFrom::Start(page_num.as_u64() * PAGE_SIZE as u64)).expect("seek failed");
         self.file.write_all(page).expect("write failed");
-        self.length = std::cmp::max(self.length, PageNum(page_num.0 + 1));
+        self.length = std::cmp::max(self.length, PageNum::from_u64(page_num.as_u64() + 1));
     }
 
     fn sync(&mut self) {
@@ -97,8 +97,8 @@ mod tests {
         }
 
         // Write out of order to ensure seek works correctly
-        store.write(PageNum(1), &temp2);
-        store.write(PageNum(0), &temp1);
+        store.write(PageNum::from_u64(1), &temp2);
+        store.write(PageNum::from_u64(0), &temp1);
 
         let bytes = fs::read(file.path().to_str().unwrap()).unwrap();
         assert_eq!(bytes[..PAGE_SIZE], temp1);
@@ -119,9 +119,9 @@ mod tests {
         let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
         let mut temp2: PageData = [0; PAGE_SIZE];
-        store.read(PageNum(1), &mut temp2);
+        store.read(PageNum::from_u64(1), &mut temp2);
         let mut temp1: PageData = [0; PAGE_SIZE];
-        store.read(PageNum(0), &mut temp1);
+        store.read(PageNum::from_u64(0), &mut temp1);
 
         assert_eq!(temp1, source_buf[..PAGE_SIZE]);
         assert_eq!(temp2, source_buf[PAGE_SIZE..]);
@@ -138,7 +138,7 @@ mod tests {
             *dest = src;
         }
 
-        store.write(PageNum(0), &temp1);
+        store.write(PageNum::from_u64(0), &temp1);
         store.sync();
 
         let bytes = fs::read(file.path().to_str().unwrap()).unwrap();
@@ -152,7 +152,7 @@ mod tests {
         let mut store = FileStore::open(file.path().to_str().unwrap()).unwrap();
 
         let mut page: PageData = [0; PAGE_SIZE];
-        store.read(PageNum(2), &mut page);
+        store.read(PageNum::from_u64(2), &mut page);
         assert_eq!(page, [0u8; PAGE_SIZE]);
     }
 
@@ -183,12 +183,12 @@ mod tests {
             .open("/dev/null").unwrap();
         let mut store = FileStore {
             file,
-            length: PageNum(0)
+            length: PageNum::from_u64(0)
         };
 
         let mut temp1: PageData = [0; PAGE_SIZE];
-        store.write(PageNum(0), &temp1);
-        store.read(PageNum(0), &mut temp1);
+        store.write(PageNum::from_u64(0), &temp1);
+        store.read(PageNum::from_u64(0), &mut temp1);
     }
 
     #[test]
@@ -201,10 +201,10 @@ mod tests {
             .open(file.path().to_str().unwrap()).unwrap();
         let mut store = FileStore {
             file,
-            length: PageNum(0)
+            length: PageNum::from_u64(0)
         };
 
         let page: PageData = [0; PAGE_SIZE];
-        store.write(PageNum(0), &page);
+        store.write(PageNum::from_u64(0), &page);
     }
 }

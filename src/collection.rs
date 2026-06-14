@@ -60,7 +60,7 @@ impl Collection {
             indices.push(Index{
                 field: FieldPath::new(index["path"].as_str()
                     .expect("path is not a string")).expect("invalid field path"),
-                btree: BTree::open(PageNum(index["root_pnum"].as_u64()
+                btree: BTree::open(PageNum::from_u64(index["root_pnum"].as_u64()
                     .expect("root_pnum is not an integer")))
             });
         }
@@ -68,7 +68,7 @@ impl Collection {
         Collection {
             name: metadata["name"].to_string(),
             next_docid: 1,
-            document_tree: BTree::open(PageNum(metadata["root_page_pnum"].as_u64()
+            document_tree: BTree::open(PageNum::from_u64(metadata["root_page_pnum"].as_u64()
                 .expect("root_page_pnum is not an integer"))),
             indices
         }
@@ -95,11 +95,11 @@ impl Collection {
     pub fn get_metadata(&self) -> Value {
         json!({
             "name": self.name,
-            "root_page_pnum": self.document_tree.get_root_page_id().0,
+            "root_page_pnum": self.document_tree.get_root_page_id().as_u64(),
             "indices": self.indices.iter().map(|index| {
                 json!({
                     "path": index.field.to_string(),
-                    "root_pnum": index.btree.get_root_page_id().0
+                    "root_pnum": index.btree.get_root_page_id().as_u64()
                 })
             }).collect::<Vec<Value>>()
         })
@@ -135,7 +135,7 @@ impl Collection {
 
             let mut offset = 1; // Skip the flag byte we speculatively added
             let mut page_num = Some(page_allocator.alloc());
-            set_u64(&mut pointer, 9, PageNum::to_disk(page_num));
+            set_u64(&mut pointer, 9, page_num.to_encoded());
             while offset < content.len() {
                 let mut page = page_cache.lock_page_mut(page_num.expect("null page num"));
                 let to_copy = std::cmp::min(content.len() - offset, PAGE_SIZE - 8);
@@ -146,7 +146,7 @@ impl Collection {
                     None
                 };
 
-                set_u64(&mut page[..], 0, PageNum::to_disk(page_num));
+                set_u64(&mut page[..], 0, page_num.to_encoded());
                 offset += to_copy;
             }
 
@@ -245,10 +245,10 @@ impl Collection {
 
         // Free overflow pages if present
         if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
-            let mut current_pnum = PageNum::from_disk(get_u64(&document_bytes, 9));
+            let mut current_pnum = PageNum::from_encoded(get_u64(&document_bytes, 9));
             while let Some(pnum) = current_pnum {
                 let page = page_cache.lock_page(pnum);
-                let next_page = PageNum::from_disk(get_u64(&page[..], 0));
+                let next_page = PageNum::from_encoded(get_u64(&page[..], 0));
                 drop(page);
                 page_allocator.free(pnum);
                 current_pnum = next_page;
@@ -272,7 +272,7 @@ fn get_document_body(document_bytes: &[u8], page_cache: &PageCache) -> Value {
     if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
         // This is using overflow pages
         let mut length = get_u64(document_bytes, 1) as usize;
-        let mut current_pnum = PageNum::from_disk(get_u64(document_bytes, 9));
+        let mut current_pnum = PageNum::from_encoded(get_u64(document_bytes, 9));
 
         let mut content = Vec::with_capacity(length);
         while length > 0 {
@@ -281,7 +281,7 @@ fn get_document_body(document_bytes: &[u8], page_cache: &PageCache) -> Value {
             }
 
             let page = page_cache.lock_page(current_pnum.unwrap());
-            current_pnum = PageNum::from_disk(get_u64(&page[..], 0));
+            current_pnum = PageNum::from_encoded(get_u64(&page[..], 0));
             let to_copy = std::cmp::min(length, PAGE_SIZE - 8);
             content.extend_from_slice(&page[8..8 + to_copy]);
             length -= to_copy;
@@ -1252,8 +1252,8 @@ mod tests {
 
         // XXX hack hard coded page address
         {
-            let mut page = page_cache.lock_page_mut(PageNum(page_num.0 + 1));
-            set_u64(&mut page[..], 0, PageNum::to_disk(None));
+            let mut page = page_cache.lock_page_mut(PageNum::from_u64(page_num.as_u64() + 1));
+            set_u64(&mut page[..], 0, None.to_encoded());
         }
 
         SequentialScan::new(&collection, &page_cache).next();

@@ -32,14 +32,14 @@ pub type PageData = [u8; PAGE_SIZE];
 
 // This uniquely identifies a page size chunk inside the file.
 #[derive(PartialEq, Ord, PartialOrd, Eq, Debug, Clone, Copy, Hash, Default)]
-pub struct PageNum(pub u64);
+pub struct PageNum(u64);
 
 impl PageNum {
     // This value is stored on disk to delimit linked lists or indicate a field
     // doesn't have a value.
     const INVALID: u64 = u64::MAX;
 
-    pub fn from_disk(val: u64) -> Option<Self> {
+    pub fn from_encoded(val: u64) -> Option<Self> {
         if val == Self::INVALID {
             None
         } else {
@@ -47,22 +47,38 @@ impl PageNum {
         }
     }
 
-    pub fn to_disk(page_num: Option<Self>) -> u64 {
-        match page_num {
-            Some(PageNum(val)) => val,
-            None => Self::INVALID,
-        }
-    }
-
     pub fn from_bytes(raw: &[u8]) -> Option<Self> {
-        Self::from_disk(u64::from_le_bytes(raw.try_into().expect("value was not 8 bytes")))
+        Self::from_encoded(u64::from_le_bytes(raw.try_into().expect("value was not 8 bytes")))
     }
 
-    pub fn to_bytes(page_num: Option<Self>) -> [u8; 8] {
-        match page_num {
-            Some(PageNum(val)) => val.to_le_bytes(),
-            None => [0xff; 8],
+    pub fn to_bytes(self) -> [u8; 8] {
+        self.0.to_le_bytes()
+    }
+
+    pub const fn from_u64(val: u64) -> Self {
+        PageNum(val)
+    }
+
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+}
+
+pub trait PageNumOptionExt {
+    fn to_encoded(&self) -> u64;
+    fn to_bytes(&self) -> [u8; 8];
+}
+
+impl PageNumOptionExt for Option<PageNum> {
+    fn to_encoded(&self) -> u64 {
+        match self {
+            Some(PageNum(val)) => *val,
+            None => PageNum::INVALID,
         }
+    }
+
+    fn to_bytes(&self) -> [u8; 8] {
+        self.to_encoded().to_le_bytes()
     }
 }
 
@@ -219,7 +235,7 @@ impl PageCacheInner {
             persistent_store: persistent_store.clone(),
             transaction_active: false,
             dirty_page_list: IndexQueue::new(size),
-            write_ahead_log: WriteAheadLog::new(PageNum(1), LOG_PAGES, &persistent_store)
+            write_ahead_log: WriteAheadLog::new(PageNum::from_u64(1), LOG_PAGES, &persistent_store)
         }
     }
 
@@ -349,23 +365,23 @@ mod tests {
         let (mock_io, page_cache) = setup_cache(5);
 
         // Fill the first page
-        mock_io.borrow_mut().write(PageNum(100), &[0xcc; PAGE_SIZE]);
+        mock_io.borrow_mut().write(PageNum::from_u64(100), &[0xcc; PAGE_SIZE]);
 
         {
-            let guard = page_cache.lock_page(PageNum(100));
+            let guard = page_cache.lock_page(PageNum::from_u64(100));
             assert_eq!(*guard, [0xcc; PAGE_SIZE]);
         }
 
         // Read a different page
-        mock_io.borrow_mut().write(PageNum(101), &[0xdd; PAGE_SIZE]);
+        mock_io.borrow_mut().write(PageNum::from_u64(101), &[0xdd; PAGE_SIZE]);
         {
-            let guard = page_cache.lock_page(PageNum(101));
+            let guard = page_cache.lock_page(PageNum::from_u64(101));
             assert_eq!(*guard, [0xdd; PAGE_SIZE]);
         }
 
         // Now read the original page. It's cached, so it will not need to be re-read
         {
-            let guard = page_cache.lock_page(PageNum(100));
+            let guard = page_cache.lock_page(PageNum::from_u64(100));
             assert_eq!(*guard, [0xcc; PAGE_SIZE]);
         }
     }
@@ -380,13 +396,13 @@ mod tests {
             let _transaction = page_cache.begin_transaction();
 
             // Read a page, set the wriable bit
-            let mut guard = page_cache.lock_page_mut(PageNum(100));
+            let mut guard = page_cache.lock_page_mut(PageNum::from_u64(100));
             *guard = [0xcc; PAGE_SIZE];
         }
 
         // Unlocking will cause a writeback. Ensure the backing store is correct.
         let mut readback: PageData = [0; PAGE_SIZE];
-        mock_io.borrow_mut().read(PageNum(100), &mut readback);
+        mock_io.borrow_mut().read(PageNum::from_u64(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
     }
 
@@ -401,7 +417,7 @@ mod tests {
             let _transaction = page_cache.begin_transaction();
 
             // Read a page, set the writable bit
-            let _guard = page_cache.lock_page_mut(PageNum(100));
+            let _guard = page_cache.lock_page_mut(PageNum::from_u64(100));
         }
 
         // Now lock the page again.
@@ -409,14 +425,14 @@ mod tests {
             let _transaction = page_cache.begin_transaction();
 
             // Read a page, set the writable bit
-            let mut guard = page_cache.lock_page_mut(PageNum(100));
+            let mut guard = page_cache.lock_page_mut(PageNum::from_u64(100));
             *guard = [0xcc; PAGE_SIZE];
         }
 
         // Unlocking will cause a writeback.
         // We only check the first byte, but ensure it is updated correctly.
         let mut readback: PageData = [0; PAGE_SIZE];
-        mock_io.borrow_mut().read(PageNum(100), &mut readback);
+        mock_io.borrow_mut().read(PageNum::from_u64(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
     }
 
@@ -426,16 +442,16 @@ mod tests {
     fn test_pc_dirty_relock() {
         let (mock_io, page_cache) = setup_cache(5);
         let transaction = page_cache.begin_transaction();
-        let guard1 = page_cache.lock_page_mut(PageNum(100));
+        let guard1 = page_cache.lock_page_mut(PageNum::from_u64(100));
         drop(guard1);
-        let mut guard2 = page_cache.lock_page_mut(PageNum(100));
+        let mut guard2 = page_cache.lock_page_mut(PageNum::from_u64(100));
         *guard2 = [0xcc; PAGE_SIZE];
         drop(guard2);
 
         drop(transaction);
 
         let mut readback: PageData = [0; PAGE_SIZE];
-        mock_io.borrow_mut().read(PageNum(100), &mut readback);
+        mock_io.borrow_mut().read(PageNum::from_u64(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
     }
 
@@ -445,12 +461,12 @@ mod tests {
         let (_mock_io, page_cache) = setup_cache(5);
 
         let _transaction = page_cache.begin_transaction();
-        let _guard1 = page_cache.lock_page_mut(PageNum(100));
-        let _guard2 = page_cache.lock_page_mut(PageNum(101));
-        let _guard3 = page_cache.lock_page_mut(PageNum(102));
-        let _guard4 = page_cache.lock_page_mut(PageNum(103));
-        let _guard5 = page_cache.lock_page_mut(PageNum(104));
-        let _guard6 = page_cache.lock_page_mut(PageNum(105));
+        let _guard1 = page_cache.lock_page_mut(PageNum::from_u64(100));
+        let _guard2 = page_cache.lock_page_mut(PageNum::from_u64(101));
+        let _guard3 = page_cache.lock_page_mut(PageNum::from_u64(102));
+        let _guard4 = page_cache.lock_page_mut(PageNum::from_u64(103));
+        let _guard5 = page_cache.lock_page_mut(PageNum::from_u64(104));
+        let _guard6 = page_cache.lock_page_mut(PageNum::from_u64(105));
     }
 
     #[test]
@@ -477,7 +493,7 @@ mod tests {
         let mock_io: Rc<RefCell<dyn PersistentStore>> =
             Rc::new(RefCell::new(MockPersistentStore::default()));
         let page_cache = PageCache::new(10, Rc::clone(&mock_io));
-        let _guard = page_cache.lock_page_mut(PageNum(3));
+        let _guard = page_cache.lock_page_mut(PageNum::from_u64(3));
     }
 
     // Lock the same page twice for write in the same transaction
@@ -489,8 +505,8 @@ mod tests {
             Rc::new(RefCell::new(MockPersistentStore::default()));
         let page_cache = PageCache::new(10, Rc::clone(&mock_io));
         let _transaction = page_cache.begin_transaction();
-        let _guard1 = page_cache.lock_page_mut(PageNum(100));
-        let _guard2 = page_cache.lock_page_mut(PageNum(100));
+        let _guard1 = page_cache.lock_page_mut(PageNum::from_u64(100));
+        let _guard2 = page_cache.lock_page_mut(PageNum::from_u64(100));
     }
 
     // Lock first read, then write, ensure it gets written back
@@ -503,13 +519,13 @@ mod tests {
         const WRITE_VAL: u8 = 0xcc;
         {
             let _transaction = page_cache.begin_transaction();
-            let _guard1 = page_cache.lock_page(PageNum(100));
-            let mut guard = page_cache.lock_page_mut(PageNum(100));
+            let _guard1 = page_cache.lock_page(PageNum::from_u64(100));
+            let mut guard = page_cache.lock_page_mut(PageNum::from_u64(100));
             *guard = [0xcc; PAGE_SIZE];
         }
 
         let mut readback: PageData = [0; PAGE_SIZE];
-        mock_io.borrow_mut().read(PageNum(100), &mut readback);
+        mock_io.borrow_mut().read(PageNum::from_u64(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
     }
 
@@ -521,14 +537,14 @@ mod tests {
         const WRITE_VAL: u8 = 0xcc;
         {
             let _transaction = page_cache.begin_transaction();
-            let mut guard1 = page_cache.lock_page_mut(PageNum(100));
+            let mut guard1 = page_cache.lock_page_mut(PageNum::from_u64(100));
             *guard1 = [0xcc; PAGE_SIZE];
 
-            let _guard2 = page_cache.lock_page(PageNum(100));
+            let _guard2 = page_cache.lock_page(PageNum::from_u64(100));
         }
 
         let mut readback: PageData = [0; PAGE_SIZE];
-        mock_io.borrow_mut().read(PageNum(100), &mut readback);
+        mock_io.borrow_mut().read(PageNum::from_u64(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
     }
 
@@ -536,14 +552,14 @@ mod tests {
     #[should_panic = "Attempt to lock invalid page"]
     fn test_invalid_page() {
         let (_mock_io, page_cache) = setup_cache(5);
-        let _guard = page_cache.lock_page(PageNum(u64::MAX));
+        let _guard = page_cache.lock_page(PageNum::from_u64(u64::MAX));
     }
 
     #[test]
     #[should_panic = "Attempt to lock page in write ahead log"]
     fn test_write_ahead_page() {
         let (_mock_io, page_cache) = setup_cache(5);
-        let _guard = page_cache.lock_page(PageNum(2));
+        let _guard = page_cache.lock_page(PageNum::from_u64(2));
     }
 
     #[test]
@@ -568,13 +584,13 @@ mod tests {
                 let page_num = rng.random_range(LOG_PAGES + 1..TOTAL_PAGES + LOG_PAGES + 1);
                 // Randomly decide if to lock for read or write
                 if rng.random_bool(0.5) {
-                    let mut guard = page_cache.lock_page_mut(PageNum(page_num as u64));
+                    let mut guard = page_cache.lock_page_mut(PageNum::from_u64(page_num as u64));
                     assert_eq!(*guard, oracle[page_num]);
                     rng.fill(&mut oracle[page_num]);
                     guard.copy_from_slice(oracle[page_num].as_slice());
                     mut_guards.push(guard);
                 } else {
-                    let guard = page_cache.lock_page(PageNum(page_num as u64));
+                    let guard = page_cache.lock_page(PageNum::from_u64(page_num as u64));
                     assert_eq!(*guard, oracle[page_num]);
                     guards.push(guard);
                 }

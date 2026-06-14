@@ -30,7 +30,7 @@
 // (value length is inferred based on record length)
 
 use crate::page_allocator::PageAllocator;
-use crate::page_cache::{PageCache, PageNum, PageData, PAGE_SIZE};
+use crate::page_cache::*;
 use crate::vararray::*;
 use crate::util::*;
 
@@ -53,9 +53,7 @@ impl Iterator for BTreeCursor {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_node_pnum.is_none() {
-            return None;
-        }
+        self.current_node_pnum?;
 
         let page = self.page_cache.lock_page(self.current_node_pnum.unwrap());
         let result = (
@@ -267,7 +265,7 @@ impl BTree {
                 // "right_child" member, the other gets an entry with a key.
                 init_btree_node(&mut page);
                 set_not_leaf(&mut page); // If the root was a leaf, it is not now.
-                append_entry(&mut page, &split_key, &PageNum::to_bytes(Some(new_page_pnum1)));
+                append_entry(&mut page, &split_key, &new_page_pnum1.to_bytes());
                 set_right_child(&mut page, Some(new_page_pnum2));
                 break;
             } else {
@@ -306,7 +304,7 @@ impl BTree {
                 }
 
                 insert_key = new_parent_key;
-                insert_value = new_page_pnum.0.to_le_bytes().to_vec();
+                insert_value = new_page_pnum.to_bytes().to_vec();
             }
         }
     }
@@ -434,27 +432,27 @@ fn set_not_leaf(page: &mut PageData) {
 }
 
 fn get_next_sib(page: &PageData) -> Option<PageNum> {
-    PageNum::from_disk(get_u64(page, HEADER_NEXT_SIB_OFFS))
+    PageNum::from_encoded(get_u64(page, HEADER_NEXT_SIB_OFFS))
 }
 
 fn set_next_sib(page: &mut PageData, page_num: Option<PageNum>) {
-    set_u64(&mut page[..], HEADER_NEXT_SIB_OFFS, PageNum::to_disk(page_num));
+    set_u64(&mut page[..], HEADER_NEXT_SIB_OFFS, page_num.to_encoded());
 }
 
 fn get_prev_sib(page: &PageData) -> Option<PageNum> {
-    PageNum::from_disk(get_u64(page, HEADER_PREV_SIB_OFFS))
+    PageNum::from_encoded(get_u64(page, HEADER_PREV_SIB_OFFS))
 }
 
 fn set_prev_sib(page: &mut PageData, page_num: Option<PageNum>) {
-    set_u64(&mut page[..], HEADER_PREV_SIB_OFFS,  PageNum::to_disk(page_num));
+    set_u64(&mut page[..], HEADER_PREV_SIB_OFFS, page_num.to_encoded());
 }
 
 fn get_right_child(page: &PageData) -> Option<PageNum> {
-    PageNum::from_disk(get_u64(page, HEADER_RIGHT_CHILD_OFFS))
+    PageNum::from_encoded(get_u64(page, HEADER_RIGHT_CHILD_OFFS))
 }
 
 fn set_right_child(page: &mut PageData, page_num: Option<PageNum>) {
-    set_u64(&mut page[..], HEADER_RIGHT_CHILD_OFFS, PageNum::to_disk(page_num));
+    set_u64(&mut page[..], HEADER_RIGHT_CHILD_OFFS, page_num.to_encoded());
 }
 
 fn get_entry_size(key: &[u8], value: &[u8]) -> usize {
@@ -491,7 +489,7 @@ fn get_entry_value(page: &PageData, rec_num: usize) -> &[u8] {
 //   in the table.
 //
 fn find_key(page: &PageData, key: &[u8]) -> usize {
-    assert!(key.len() > 0, "Find with empty key");
+    assert!(!key.is_empty(), "Find with empty key");
 
     let mut low = 0;
     let mut high = get_num_vararray_entries(page);
@@ -714,7 +712,7 @@ mod tests {
             init_btree_node(&mut child_page2);
             set_not_leaf(&mut root_page);
 
-            append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
+            append_entry(&mut root_page, b"banana", &child_page1_num.to_bytes());
             set_right_child(&mut root_page, Some(child_page2_num));
 
             append_entry(&mut child_page1, b"bbnana", b"foo"); // Err, past parent key
@@ -741,7 +739,7 @@ mod tests {
             init_btree_node(&mut child_page2);
             set_not_leaf(&mut root_page);
 
-            append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
+            append_entry(&mut root_page, b"banana", &child_page1_num.to_bytes());
             set_right_child(&mut root_page, Some(child_page2_num));
 
             append_entry(&mut child_page1, b"abacus", b"foo");
@@ -768,7 +766,7 @@ mod tests {
             init_btree_node(&mut child_page2);
             set_not_leaf(&mut root_page);
 
-            append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
+            append_entry(&mut root_page, b"banana", &child_page1_num.to_bytes());
             set_right_child(&mut root_page, Some(child_page2_num));
         }
 
@@ -1003,7 +1001,7 @@ mod tests {
         let mut i = 0;
         for (key, val) in tree.iterate(false, &page_cache) {
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(PageNum::from_bytes(&val).expect("bad value"), PageNum(i as u64));
+            assert_eq!(PageNum::from_bytes(&val), PageNum::from_encoded(i as u64));
             i += 1;
         }
     }
@@ -1017,7 +1015,7 @@ mod tests {
         for i in (0..NUM_TEST_ENTRIES).rev() {
             let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(PageNum::from_bytes(&val).expect("bad value"), PageNum(i as u64));
+            assert_eq!(PageNum::from_bytes(&val),  PageNum::from_encoded(i as u64));
         }
 
         assert_eq!(cursor.next(), None);
@@ -1032,7 +1030,7 @@ mod tests {
         for i in START_KEY_IDX..START_KEY_IDX + 10 {
             let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), &gen_key_for_index(i));
-            assert_eq!(PageNum::from_bytes(&val).expect("bad value"), PageNum(i as u64));
+            assert_eq!(PageNum::from_bytes(&val),  PageNum::from_encoded(i as u64));
         }
     }
 
@@ -1044,7 +1042,7 @@ mod tests {
         let mut cursor = tree.find(&[0u8], false, &page_cache);
         let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
         assert_eq!(key.as_slice(), &gen_key_for_index(0));
-            assert_eq!(PageNum::from_bytes(&val).expect("bad value"), PageNum(0));
+            assert_eq!(PageNum::from_bytes(&val),  PageNum::from_encoded(0));
     }
 
     // Key is before first key and going in reverse. Nothing to fetch.
@@ -1085,7 +1083,7 @@ mod tests {
 
             let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(PageNum::from_bytes(&val).expect("bad value"), PageNum(i as u64));
+            assert_eq!(PageNum::from_bytes(&val),  PageNum::from_encoded(i as u64));
         }
 
         assert!(cursor.next().is_none());
@@ -1108,7 +1106,7 @@ mod tests {
         for i in 0..NUM_TEST_ENTRIES {
             let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(PageNum::from_bytes(&val).expect("bad value"), PageNum(i as u64));
+            assert_eq!(PageNum::from_bytes(&val),  PageNum::from_encoded(i as u64));
         }
     }
 

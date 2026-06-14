@@ -84,7 +84,7 @@ impl PersistentStore for MockPersistentStore {
 fn test_read_zeroes() {
     let mut mock = MockPersistentStore::default();
     let mut temp: PageData = [0; PAGE_SIZE];
-    mock.read(PageNum(1), &mut temp);
+    mock.read(PageNum::from_u64(1), &mut temp);
     assert_eq!(&temp, &[0; PAGE_SIZE]);
 }
 
@@ -92,15 +92,15 @@ fn test_read_zeroes() {
 fn test_readback() {
     let mut mock = MockPersistentStore::default();
     let temp1: PageData = [0xcc; PAGE_SIZE];
-    mock.write(PageNum(1), &temp1);
+    mock.write(PageNum::from_u64(1), &temp1);
 
     let mut temp2: PageData = [0; PAGE_SIZE];
-    mock.read(PageNum(1), &mut temp2);
+    mock.read(PageNum::from_u64(1), &mut temp2);
     assert_eq!(&temp1, &temp2);
 
     // Ensure other blocks are zero
     let mut temp3: PageData = [0; PAGE_SIZE];
-    mock.read(PageNum(2), &mut temp3);
+    mock.read(PageNum::from_u64(2), &mut temp3);
     assert_eq!(&[0; PAGE_SIZE], &temp3);
 }
 
@@ -119,21 +119,21 @@ fn test_any() {
 fn test_write_limit() {
     let mut mock = MockPersistentStore::default();
     mock.set_write_limit(3);
-    mock.write(PageNum(1), &[0xaa; PAGE_SIZE]);
-    mock.write(PageNum(2), &[0xbb; PAGE_SIZE]);
-    mock.write(PageNum(3), &[0xcc; PAGE_SIZE]);
-    mock.write(PageNum(4), &[0xdd; PAGE_SIZE]);
-    mock.write(PageNum(5), &[0xee; PAGE_SIZE]);
+    mock.write(PageNum::from_u64(1), &[0xaa; PAGE_SIZE]);
+    mock.write(PageNum::from_u64(2), &[0xbb; PAGE_SIZE]);
+    mock.write(PageNum::from_u64(3), &[0xcc; PAGE_SIZE]);
+    mock.write(PageNum::from_u64(4), &[0xdd; PAGE_SIZE]);
+    mock.write(PageNum::from_u64(5), &[0xee; PAGE_SIZE]);
 
     let mut temp: PageData = [0; PAGE_SIZE];
-    mock.read(PageNum(1), &mut temp);
+    mock.read(PageNum::from_u64(1), &mut temp);
     assert_eq!(temp, [0xaa; PAGE_SIZE]);
-    mock.read(PageNum(2), &mut temp);
+    mock.read(PageNum::from_u64(2), &mut temp);
     assert_eq!(temp, [0xbb; PAGE_SIZE]);
-    mock.read(PageNum(3), &mut temp);
+    mock.read(PageNum::from_u64(3), &mut temp);
     assert_eq!(temp, [0xcc; PAGE_SIZE]);
-    mock.read(PageNum(4), &mut temp);
+    mock.read(PageNum::from_u64(4), &mut temp);
     assert_eq!(temp, [0; PAGE_SIZE]);
-    mock.read(PageNum(5), &mut temp);
+    mock.read(PageNum::from_u64(5), &mut temp);
     assert_eq!(temp, [0; PAGE_SIZE]);
 }
