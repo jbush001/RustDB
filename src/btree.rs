@@ -236,7 +236,9 @@ impl BTree {
 
             // Need to split...
             if *node_pnum == self.root {
-                // Root node splits are special
+                // Split the root node. This is the only place where the tree grows.
+                // The same page number will continue to be the root, since it is
+                // referenced in other places.
                 let new_page_pnum1 = page_allocator.alloc();
                 let new_page_pnum2 = page_allocator.alloc();
 
@@ -244,6 +246,8 @@ impl BTree {
                 let mut new_page2 = page_cache.lock_page_mut(new_page_pnum2);
                 let split_key = split_node(&page, &mut new_page1, &mut new_page2);
 
+                // The root node can be a leaf if the number of entries is small. If so,
+                // need to fix the linked list of nodes.
                 if is_leaf(&page) {
                     set_next_sib(&mut new_page1, new_page_pnum2);
                     set_prev_sib(&mut new_page2, new_page_pnum1);
@@ -259,9 +263,11 @@ impl BTree {
                     insert_entry(&mut new_page1, insert_key.as_slice(), insert_value.as_slice());
                 }
 
-                // The root will have a single entry. It's no longer a leaf.
+                // Reinitialize the root. We've created two new pages and copied half
+                // of the roots entries into each of them. Now one of them will be the
+                // "right_child" member, the other gets an entry with a key.
                 init_btree_node(&mut page);
-                set_not_leaf(&mut page);
+                set_not_leaf(&mut page); // If the root was a leaf, it is not now.
                 append_entry(&mut page, &split_key, &new_page_pnum1.0.to_le_bytes());
                 set_right_child(&mut page, new_page_pnum2);
                 break;
@@ -348,9 +354,10 @@ impl BTree {
                 return;
             }
 
-            // Note here: if an interior node only has one entry, we could just
-            // propate its key up to its parent. It's a bit trickier when it is the
-            // right child, since we don't know the key here.
+            // If an interior node only has one entry, we could just propagate
+            // its key up to its parent. It's a bit trickier when it is the
+            // right child, since we don't know the key here. As such, we don't
+            // do that for simplicity.
             if get_num_vararray_entries(&page) != 0
                 || (!is_leaf(&page) && get_right_child(&page) != PageNum::INVALID) {
                 break; // Is not empty, we are done for now.
@@ -582,12 +589,12 @@ mod tests {
     use crate::page_allocator::*;
     use crate::page_cache::*;
     use crate::superblock::*;
-    use more_asserts::{assert_le, assert_lt};
-    use rand::rngs::{SmallRng};
+    use more_asserts::{assert_le, assert_lt, assert_gt};
+    use rand::rngs::SmallRng;
     use rand::{SeedableRng, RngExt};
     use rand::seq::SliceRandom;
     use std::cell::RefCell;
-    use std::cmp::{Ord};
+    use std::cmp::Ord;
     use std::rc::Rc;
     use super::*;
 
@@ -862,6 +869,135 @@ mod tests {
         (page_cache, allocator, tree)
     }
 
+
+    // TODO: could verify leaf nodes are all properly linked. This is implicitly done when
+    // tests iterate the whole tree already.
+    // TODO: this doesn't check for loops. The test will hang if such exists, so it's not a
+    // silent failure anyway, this would just give more diagnostics.
+    fn sanity_check_btree(root: &BTree, page_cache: &PageCache) {
+        fn walk_tree(page_num: PageNum, page_cache: &PageCache, low_key: Option<&[u8]>,
+            high_key: Option<&[u8]>, is_root: bool) {
+            let page = page_cache.lock_page(page_num);
+            let num_entries = get_num_vararray_entries(&page);
+            if is_root && num_entries == 0 {
+                return;
+            }
+
+            assert_gt!(num_entries, 0, "Empty page {:?} in tree", page_num);
+            sanity_check_node(&page);
+            if let Some(low) = low_key {
+                assert_gt!(get_entry_key(&page, 0), low, "Low key on page {:?} overlaps previous sibling",
+                    page_num);
+            }
+
+            if let Some(high) = high_key {
+                assert_le!(get_entry_key(&page, num_entries - 1), high, "High key on page {:?} past parent key",
+                    page_num);
+            }
+
+            if !is_leaf(&page) {
+                for i in 0..num_entries {
+                    let child_page_num = PageNum(u64::from_le_bytes(
+                        get_entry_value(&page, i).try_into().expect(
+                        "Bad value in node")));
+                    let low_key = if i > 0 { Some(get_entry_key(&page, i - 1)) } else { None };
+                    let high_key = Some(get_entry_key(&page, i));
+
+                    walk_tree(child_page_num, page_cache, low_key, high_key, false);
+                }
+
+                walk_tree(get_right_child(&page), page_cache,
+                    Some(get_entry_key(&page, num_entries - 1)), None, false);
+            }
+        }
+
+        walk_tree(root.root, page_cache, None, None, true);
+    }
+
+    #[test]
+    fn test_sanity_empty() {
+        let (page_cache, _allocator, tree) = create_test_btree();
+        sanity_check_btree(&tree, &page_cache);
+    }
+
+    #[test]
+    #[should_panic = "High key on page PageNum(13) past parent key"]
+    fn test_sanity_bad_order1() {
+        let (page_cache, mut allocator, tree) = create_test_btree();
+        {
+            let _transaction = page_cache.begin_transaction();
+            // Lock a page and alter the leaf key so it is larger than its parent.
+            let mut root_page = page_cache.lock_page_mut(tree.root);
+            let child_page1_num = allocator.alloc();
+            let mut child_page1 = page_cache.lock_page_mut(child_page1_num);
+            let child_page2_num = allocator.alloc();
+            let mut child_page2 = page_cache.lock_page_mut(child_page2_num);
+
+            init_btree_node(&mut child_page1);
+            init_btree_node(&mut child_page2);
+            set_not_leaf(&mut root_page);
+
+            append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
+            set_right_child(&mut root_page, child_page2_num);
+
+            append_entry(&mut child_page1, b"bbnana", b"foo"); // Err, past parent key
+            append_entry(&mut child_page2, b"cabana", b"foo");
+        }
+
+        sanity_check_btree(&tree, &page_cache);
+    }
+
+    #[test]
+    #[should_panic = "Low key on page PageNum(14) overlaps previous sibling"]
+    fn test_sanity_bad_order2() {
+        let (page_cache, mut allocator, tree) = create_test_btree();
+        {
+            let _transaction = page_cache.begin_transaction();
+            // Lock a page and alter the leaf key so it is larger than its parent.
+            let mut root_page = page_cache.lock_page_mut(tree.root);
+            let child_page1_num = allocator.alloc();
+            let mut child_page1 = page_cache.lock_page_mut(child_page1_num);
+            let child_page2_num = allocator.alloc();
+            let mut child_page2 = page_cache.lock_page_mut(child_page2_num);
+
+            init_btree_node(&mut child_page1);
+            init_btree_node(&mut child_page2);
+            set_not_leaf(&mut root_page);
+
+            append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
+            set_right_child(&mut root_page, child_page2_num);
+
+            append_entry(&mut child_page1, b"abacus", b"foo");
+            append_entry(&mut child_page2, b"aardvark", b"foo"); // Err, before last parent key
+        }
+
+        sanity_check_btree(&tree, &page_cache);
+    }
+
+    #[test]
+    #[should_panic = " Empty page PageNum(13) in tree"]
+    fn test_sanity_empty_node() {
+        let (page_cache, mut allocator, tree) = create_test_btree();
+        {
+            let _transaction = page_cache.begin_transaction();
+            // Lock a page and alter the leaf key so it is larger than its parent.
+            let mut root_page = page_cache.lock_page_mut(tree.root);
+            let child_page1_num = allocator.alloc();
+            let mut child_page1 = page_cache.lock_page_mut(child_page1_num);
+            let child_page2_num = allocator.alloc();
+            let mut child_page2 = page_cache.lock_page_mut(child_page2_num);
+
+            init_btree_node(&mut child_page1);
+            init_btree_node(&mut child_page2);
+            set_not_leaf(&mut root_page);
+
+            append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
+            set_right_child(&mut root_page, child_page2_num);
+        }
+
+        sanity_check_btree(&tree, &page_cache);
+    }
+
     #[test]
     fn test_valid_btree_create() {
         let (page_cache, _alloc, tree) = populate_test_btree(256);
@@ -959,6 +1095,7 @@ mod tests {
         }
 
         assert!(cursor.next().is_none());
+        sanity_check_btree(&tree, &page_cache);
     }
 
     #[test]
@@ -999,7 +1136,7 @@ mod tests {
             }
         }
 
-        tree.print(&page_cache);
+        sanity_check_btree(&tree, &page_cache);
 
         let mut cursor = tree.iterate(false, &page_cache);
         assert_eq!(cursor.next(), None);
@@ -1069,7 +1206,7 @@ mod tests {
         let mut oracle = Oracle{ entries: Vec::new() };
         let (page_cache, mut allocator, tree) = create_test_btree();
 
-        let total_reps = 2000;
+        let total_reps = 3000;
         let min_psub: f64 = 0.3;
         for rep in 0..total_reps {
             let p_add: f64 = min_psub + (1.0 - min_psub) * (1.0 - (rep as f64 / total_reps as f64));
@@ -1096,9 +1233,15 @@ mod tests {
             if oracle.entries.len() > 0 {
                 oracle.validate(tree.iterate(false, &page_cache));
             }
+
+            // This is a bit expensive, so do it periodically
+            if rep % 100 == 0 {
+                sanity_check_btree(&tree, &page_cache);
+            }
         }
 
         oracle.validate(tree.iterate(false, &page_cache));
+        sanity_check_btree(&tree, &page_cache);
     }
 
     #[test]
