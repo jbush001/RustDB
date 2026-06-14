@@ -594,11 +594,48 @@ mod tests {
     use rand::{SeedableRng, RngExt};
     use rand::seq::SliceRandom;
     use std::cell::RefCell;
-    use std::cmp::Ord;
     use std::rc::Rc;
     use super::*;
 
-    fn sanity_check_node(page: &PageData) {
+    // The length of this key is important to ensure tests like
+    // delete_all create enough layers.
+    fn gen_key_for_index(index: usize) -> Vec<u8> {
+        let mut key = index.to_be_bytes().to_vec();
+        key.extend_from_slice(&[0u8].repeat(256));
+        key
+    }
+
+    fn create_test_btree() -> (PageCache, PageAllocator, BTree) {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> =
+            Rc::new(RefCell::new(MockPersistentStore::default()));
+        let mut page_cache = PageCache::new(50, Rc::clone(&mock_io));
+        let _transaction = page_cache.begin_transaction();
+
+        {
+            let mut page = page_cache.lock_page_mut(SUPERBLOCK_FPID);
+            init_superblock(&mut page);
+        }
+
+        let mut allocator = PageAllocator::new(&mut page_cache);
+        let tree = BTree::create(&page_cache, &mut allocator);
+
+        (page_cache, allocator, tree)
+    }
+
+    fn populate_test_btree(count: usize) -> (PageCache, PageAllocator, BTree) {
+        let (page_cache, mut allocator, tree) = create_test_btree();
+
+        let mut test_sequence: Vec<usize> = (0..count).collect();
+        test_sequence.shuffle(&mut SmallRng::seed_from_u64(0xc0fc47a65d406179));
+        for i in test_sequence {
+            let _transaction = page_cache.begin_transaction();
+            tree.insert(&gen_key_for_index(i), &(i as u64).to_le_bytes(), &page_cache, &mut allocator);
+        }
+
+        (page_cache, allocator, tree)
+    }
+
+    fn validate_node(page: &PageData) {
         // Ensure the keys are in order
         let mut last_key: &[u8] = &[0];
         for i in 0..get_num_vararray_entries(page) {
@@ -608,6 +645,134 @@ mod tests {
         }
     }
 
+    // TODO: could verify leaf nodes are all properly linked. This is implicitly done when
+    // tests iterate the whole tree already.
+    // TODO: this doesn't check for loops. The test will hang if such exists, so it's not a
+    // silent failure anyway, this would just give more diagnostics.
+    fn validate_btree(root: &BTree, page_cache: &PageCache) {
+        fn walk_tree(page_num: PageNum, page_cache: &PageCache, low_key: Option<&[u8]>,
+            high_key: Option<&[u8]>, is_root: bool) {
+            let page = page_cache.lock_page(page_num);
+            let num_entries = get_num_vararray_entries(&page);
+            if is_root && num_entries == 0 {
+                return;
+            }
+
+            assert_gt!(num_entries, 0, "Empty page {:?} in tree", page_num);
+            validate_node(&page);
+            if let Some(low) = low_key {
+                assert_gt!(get_entry_key(&page, 0), low, "Low key on page {:?} overlaps previous sibling",
+                    page_num);
+            }
+
+            if let Some(high) = high_key {
+                assert_le!(get_entry_key(&page, num_entries - 1), high, "High key on page {:?} past parent key",
+                    page_num);
+            }
+
+            if !is_leaf(&page) {
+                for i in 0..num_entries {
+                    let child_page_num = PageNum(u64::from_le_bytes(
+                        get_entry_value(&page, i).try_into().expect(
+                        "Bad value in node")));
+                    let low_key = if i > 0 { Some(get_entry_key(&page, i - 1)) } else { None };
+                    let high_key = Some(get_entry_key(&page, i));
+
+                    walk_tree(child_page_num, page_cache, low_key, high_key, false);
+                }
+
+                walk_tree(get_right_child(&page), page_cache,
+                    Some(get_entry_key(&page, num_entries - 1)), None, false);
+            }
+        }
+
+        walk_tree(root.root, page_cache, None, None, true);
+    }
+
+    #[test]
+    fn test_validate_empty() {
+        let (page_cache, _allocator, tree) = create_test_btree();
+        validate_btree(&tree, &page_cache);
+    }
+
+    #[test]
+    #[should_panic = "High key on page PageNum(13) past parent key"]
+    fn test_validate_bad_order1() {
+        let (page_cache, mut allocator, tree) = create_test_btree();
+        {
+            let _transaction = page_cache.begin_transaction();
+            // Lock a page and alter the leaf key so it is larger than its parent.
+            let mut root_page = page_cache.lock_page_mut(tree.root);
+            let child_page1_num = allocator.alloc();
+            let mut child_page1 = page_cache.lock_page_mut(child_page1_num);
+            let child_page2_num = allocator.alloc();
+            let mut child_page2 = page_cache.lock_page_mut(child_page2_num);
+
+            init_btree_node(&mut child_page1);
+            init_btree_node(&mut child_page2);
+            set_not_leaf(&mut root_page);
+
+            append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
+            set_right_child(&mut root_page, child_page2_num);
+
+            append_entry(&mut child_page1, b"bbnana", b"foo"); // Err, past parent key
+            append_entry(&mut child_page2, b"cabana", b"foo");
+        }
+
+        validate_btree(&tree, &page_cache);
+    }
+
+    #[test]
+    #[should_panic = "Low key on page PageNum(14) overlaps previous sibling"]
+    fn test_validate_bad_order2() {
+        let (page_cache, mut allocator, tree) = create_test_btree();
+        {
+            let _transaction = page_cache.begin_transaction();
+            // Lock a page and alter the leaf key so it is larger than its parent.
+            let mut root_page = page_cache.lock_page_mut(tree.root);
+            let child_page1_num = allocator.alloc();
+            let mut child_page1 = page_cache.lock_page_mut(child_page1_num);
+            let child_page2_num = allocator.alloc();
+            let mut child_page2 = page_cache.lock_page_mut(child_page2_num);
+
+            init_btree_node(&mut child_page1);
+            init_btree_node(&mut child_page2);
+            set_not_leaf(&mut root_page);
+
+            append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
+            set_right_child(&mut root_page, child_page2_num);
+
+            append_entry(&mut child_page1, b"abacus", b"foo");
+            append_entry(&mut child_page2, b"aardvark", b"foo"); // Err, before last parent key
+        }
+
+        validate_btree(&tree, &page_cache);
+    }
+
+    #[test]
+    #[should_panic = "Empty page PageNum(13) in tree"]
+    fn test_validate_empty_node() {
+        let (page_cache, mut allocator, tree) = create_test_btree();
+        {
+            let _transaction = page_cache.begin_transaction();
+            // Lock a page and alter the leaf key so it is larger than its parent.
+            let mut root_page = page_cache.lock_page_mut(tree.root);
+            let child_page1_num = allocator.alloc();
+            let mut child_page1 = page_cache.lock_page_mut(child_page1_num);
+            let child_page2_num = allocator.alloc();
+            let mut child_page2 = page_cache.lock_page_mut(child_page2_num);
+
+            init_btree_node(&mut child_page1);
+            init_btree_node(&mut child_page2);
+            set_not_leaf(&mut root_page);
+
+            append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
+            set_right_child(&mut root_page, child_page2_num);
+        }
+
+        validate_btree(&tree, &page_cache);
+    }
+
     #[test]
     fn test_get_key_val() {
         let mut page: PageData = [0; PAGE_SIZE];
@@ -615,7 +780,7 @@ mod tests {
 
         append_entry(&mut page, b"foobar", b"abcdefghijklmnopqrstuwxyz");
         append_entry(&mut page, b"zzzz", b"3.1415926535897932384626433832");
-        sanity_check_node(&page);
+        validate_node(&page);
         assert_eq!(get_num_vararray_entries(&page), 2);
 
         assert_eq!(get_entry_key(&page, 0), b"foobar");
@@ -634,7 +799,7 @@ mod tests {
         append_entry(&mut page, b"bbbb", &[0u8]);
         append_entry(&mut page, b"cccc", &[0u8]);
         append_entry(&mut page, b"dddd", &[0u8]);
-        sanity_check_node(&page);
+        validate_node(&page);
         assert_eq!(get_num_vararray_entries(&page), 4);
 
         assert_eq!(find_key(&page, b"aaa"), 0); // Search key is before first key
@@ -686,7 +851,7 @@ mod tests {
         insert_entry(&mut page, b"zebra", &[0u8]);
         insert_entry(&mut page, b"apple", &[0u8]);
         insert_entry(&mut page, b"banana", &[0u8]);
-        sanity_check_node(&page);
+        validate_node(&page);
         assert_eq!(get_num_vararray_entries(&page), 4);
 
         assert_eq!(find_key(&page, b"aardvark"), 0);
@@ -730,11 +895,11 @@ mod tests {
             insert_entry(&mut node1, &key, &(i as u64).to_le_bytes());
         }
 
-        sanity_check_node(&node1);
+        validate_node(&node1);
 
         let separator_key = split_node(&node1, &mut node2, &mut node3);
-        sanity_check_node(&node2);
-        sanity_check_node(&node3);
+        validate_node(&node2);
+        validate_node(&node3);
 
         let orig_sep_index = get_num_vararray_entries(&node2);
         assert_eq!(&separator_key, &get_entry_key(&node1, orig_sep_index));
@@ -778,11 +943,11 @@ mod tests {
             insert_entry(&mut node1, &key, &(i as u64).to_le_bytes());
         }
 
-        sanity_check_node(&node1);
+        validate_node(&node1);
 
         let separator_key = split_node(&node1, &mut node2, &mut node3);
-        sanity_check_node(&node2);
-        sanity_check_node(&node3);
+        validate_node(&node2);
+        validate_node(&node3);
 
         let orig_sep_index = get_num_vararray_entries(&node2) - 1;
         assert_eq!(&separator_key, &get_entry_key(&node1, orig_sep_index));
@@ -818,8 +983,8 @@ mod tests {
 
         assert_eq!(get_num_vararray_entries(&node2), 1);
         assert_eq!(get_num_vararray_entries(&node3), 1);
-        sanity_check_node(&node2);
-        sanity_check_node(&node3);
+        validate_node(&node2);
+        validate_node(&node3);
     }
 
     #[test]
@@ -829,173 +994,6 @@ mod tests {
         assert!(is_leaf(&page));
         page[0] = 0;
         assert!(!is_leaf(&page));
-    }
-
-    // The length of this key is important to ensure tests like
-    // delete_all create enough layers.
-    fn gen_key_for_index(index: usize) -> Vec<u8> {
-        let mut key = index.to_be_bytes().to_vec();
-        key.extend_from_slice(&[0u8].repeat(256));
-        key
-    }
-
-    fn create_test_btree() -> (PageCache, PageAllocator, BTree) {
-        let mock_io: Rc<RefCell<dyn PersistentStore>> =
-            Rc::new(RefCell::new(MockPersistentStore::default()));
-        let mut page_cache = PageCache::new(50, Rc::clone(&mock_io));
-        let _transaction = page_cache.begin_transaction();
-
-        {
-            let mut page = page_cache.lock_page_mut(SUPERBLOCK_FPID);
-            init_superblock(&mut page);
-        }
-
-        let mut allocator = PageAllocator::new(&mut page_cache);
-        let tree = BTree::create(&page_cache, &mut allocator);
-
-        (page_cache, allocator, tree)
-    }
-
-    fn populate_test_btree(count: usize) -> (PageCache, PageAllocator, BTree) {
-        let (page_cache, mut allocator, tree) = create_test_btree();
-
-        let mut test_sequence: Vec<usize> = (0..count).collect();
-        test_sequence.shuffle(&mut SmallRng::seed_from_u64(0xc0fc47a65d406179));
-        for i in test_sequence {
-            let _transaction = page_cache.begin_transaction();
-            tree.insert(&gen_key_for_index(i), &(i as u64).to_le_bytes(), &page_cache, &mut allocator);
-        }
-
-        (page_cache, allocator, tree)
-    }
-
-
-    // TODO: could verify leaf nodes are all properly linked. This is implicitly done when
-    // tests iterate the whole tree already.
-    // TODO: this doesn't check for loops. The test will hang if such exists, so it's not a
-    // silent failure anyway, this would just give more diagnostics.
-    fn sanity_check_btree(root: &BTree, page_cache: &PageCache) {
-        fn walk_tree(page_num: PageNum, page_cache: &PageCache, low_key: Option<&[u8]>,
-            high_key: Option<&[u8]>, is_root: bool) {
-            let page = page_cache.lock_page(page_num);
-            let num_entries = get_num_vararray_entries(&page);
-            if is_root && num_entries == 0 {
-                return;
-            }
-
-            assert_gt!(num_entries, 0, "Empty page {:?} in tree", page_num);
-            sanity_check_node(&page);
-            if let Some(low) = low_key {
-                assert_gt!(get_entry_key(&page, 0), low, "Low key on page {:?} overlaps previous sibling",
-                    page_num);
-            }
-
-            if let Some(high) = high_key {
-                assert_le!(get_entry_key(&page, num_entries - 1), high, "High key on page {:?} past parent key",
-                    page_num);
-            }
-
-            if !is_leaf(&page) {
-                for i in 0..num_entries {
-                    let child_page_num = PageNum(u64::from_le_bytes(
-                        get_entry_value(&page, i).try_into().expect(
-                        "Bad value in node")));
-                    let low_key = if i > 0 { Some(get_entry_key(&page, i - 1)) } else { None };
-                    let high_key = Some(get_entry_key(&page, i));
-
-                    walk_tree(child_page_num, page_cache, low_key, high_key, false);
-                }
-
-                walk_tree(get_right_child(&page), page_cache,
-                    Some(get_entry_key(&page, num_entries - 1)), None, false);
-            }
-        }
-
-        walk_tree(root.root, page_cache, None, None, true);
-    }
-
-    #[test]
-    fn test_sanity_empty() {
-        let (page_cache, _allocator, tree) = create_test_btree();
-        sanity_check_btree(&tree, &page_cache);
-    }
-
-    #[test]
-    #[should_panic = "High key on page PageNum(13) past parent key"]
-    fn test_sanity_bad_order1() {
-        let (page_cache, mut allocator, tree) = create_test_btree();
-        {
-            let _transaction = page_cache.begin_transaction();
-            // Lock a page and alter the leaf key so it is larger than its parent.
-            let mut root_page = page_cache.lock_page_mut(tree.root);
-            let child_page1_num = allocator.alloc();
-            let mut child_page1 = page_cache.lock_page_mut(child_page1_num);
-            let child_page2_num = allocator.alloc();
-            let mut child_page2 = page_cache.lock_page_mut(child_page2_num);
-
-            init_btree_node(&mut child_page1);
-            init_btree_node(&mut child_page2);
-            set_not_leaf(&mut root_page);
-
-            append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
-            set_right_child(&mut root_page, child_page2_num);
-
-            append_entry(&mut child_page1, b"bbnana", b"foo"); // Err, past parent key
-            append_entry(&mut child_page2, b"cabana", b"foo");
-        }
-
-        sanity_check_btree(&tree, &page_cache);
-    }
-
-    #[test]
-    #[should_panic = "Low key on page PageNum(14) overlaps previous sibling"]
-    fn test_sanity_bad_order2() {
-        let (page_cache, mut allocator, tree) = create_test_btree();
-        {
-            let _transaction = page_cache.begin_transaction();
-            // Lock a page and alter the leaf key so it is larger than its parent.
-            let mut root_page = page_cache.lock_page_mut(tree.root);
-            let child_page1_num = allocator.alloc();
-            let mut child_page1 = page_cache.lock_page_mut(child_page1_num);
-            let child_page2_num = allocator.alloc();
-            let mut child_page2 = page_cache.lock_page_mut(child_page2_num);
-
-            init_btree_node(&mut child_page1);
-            init_btree_node(&mut child_page2);
-            set_not_leaf(&mut root_page);
-
-            append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
-            set_right_child(&mut root_page, child_page2_num);
-
-            append_entry(&mut child_page1, b"abacus", b"foo");
-            append_entry(&mut child_page2, b"aardvark", b"foo"); // Err, before last parent key
-        }
-
-        sanity_check_btree(&tree, &page_cache);
-    }
-
-    #[test]
-    #[should_panic = " Empty page PageNum(13) in tree"]
-    fn test_sanity_empty_node() {
-        let (page_cache, mut allocator, tree) = create_test_btree();
-        {
-            let _transaction = page_cache.begin_transaction();
-            // Lock a page and alter the leaf key so it is larger than its parent.
-            let mut root_page = page_cache.lock_page_mut(tree.root);
-            let child_page1_num = allocator.alloc();
-            let mut child_page1 = page_cache.lock_page_mut(child_page1_num);
-            let child_page2_num = allocator.alloc();
-            let mut child_page2 = page_cache.lock_page_mut(child_page2_num);
-
-            init_btree_node(&mut child_page1);
-            init_btree_node(&mut child_page2);
-            set_not_leaf(&mut root_page);
-
-            append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
-            set_right_child(&mut root_page, child_page2_num);
-        }
-
-        sanity_check_btree(&tree, &page_cache);
     }
 
     #[test]
@@ -1095,7 +1093,7 @@ mod tests {
         }
 
         assert!(cursor.next().is_none());
-        sanity_check_btree(&tree, &page_cache);
+        validate_btree(&tree, &page_cache);
     }
 
     #[test]
@@ -1136,7 +1134,7 @@ mod tests {
             }
         }
 
-        sanity_check_btree(&tree, &page_cache);
+        validate_btree(&tree, &page_cache);
 
         let mut cursor = tree.iterate(false, &page_cache);
         assert_eq!(cursor.next(), None);
@@ -1166,19 +1164,16 @@ mod tests {
         tree.print(&page_cache);
     }
 
-    #[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
-    struct KeyValue(Vec<u8>, Vec<u8>);
-
     // The Oracle is a parallel data structure that tracks the expected
     // btree state based on random operations below.
     struct Oracle {
-        entries: Vec<KeyValue>
+        entries: Vec<(Vec<u8>, Vec<u8>)>
     }
 
     impl Oracle {
         // TODO: this doesn't guarantee uniqueness.
         fn add(&mut self, key: &[u8], value: &[u8]) {
-            let kv = KeyValue(key.to_vec(), value.to_vec());
+            let kv = (key.to_vec(), value.to_vec());
             let pos = match self.entries.binary_search(&kv) {
                 Ok(pos) | Err(pos) => pos
             };
@@ -1187,7 +1182,7 @@ mod tests {
         }
 
         fn validate(&self, cursor: BTreeCursor) {
-            let mut db_entries: Vec<KeyValue> = cursor.map(|x | KeyValue(x.0, x.1)).collect();
+            let mut db_entries: Vec<(Vec<u8>, Vec<u8>)> = cursor.map(|x | (x.0, x.1)).collect();
             db_entries.sort();
 
             assert_eq!(db_entries.len(), self.entries.len());
@@ -1236,12 +1231,12 @@ mod tests {
 
             // This is a bit expensive, so do it periodically
             if rep % 100 == 0 {
-                sanity_check_btree(&tree, &page_cache);
+                validate_btree(&tree, &page_cache);
             }
         }
 
         oracle.validate(tree.iterate(false, &page_cache));
-        sanity_check_btree(&tree, &page_cache);
+        validate_btree(&tree, &page_cache);
     }
 
     #[test]

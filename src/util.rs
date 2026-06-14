@@ -218,7 +218,7 @@ mod tests {
         assert_eq!(value_array[8], 0x12);
     }
 
-    fn sanity_check_lru(queue: &IndexQueue) {
+    fn validate_lru(queue: &IndexQueue) {
         // You can't have a valid head pointer with valid tail and vice versa
         assert_eq!(queue.head.is_some(), queue.tail.is_some(), "Head/tail out of sync");
         if queue.head.is_none() {
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     #[should_panic = "Head/tail out of sync"]
     fn test_head_tail_assym1() {
-        sanity_check_lru(&IndexQueue {
+        validate_lru(&IndexQueue {
             next: vec![Some(1), None],
             prev: vec![None, Some(0)],
             head: Some(0),
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     #[should_panic = "Head/tail out of sync"]
     fn test_head_tail_assym2() {
-        sanity_check_lru(&IndexQueue {
+        validate_lru(&IndexQueue {
             next: vec![Some(1), None],
             prev: vec![None, Some(0)],
             head: None,
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     #[should_panic = "Array size mismatch"]
     fn test_array_size_mismatch() {
-        sanity_check_lru(&IndexQueue {
+        validate_lru(&IndexQueue {
             next: vec![Some(1), None],
             prev: vec![Some(0)],
             head: Some(1),
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     #[should_panic = "Cycle in next pointers"]
     fn test_next_cycle() {
-        sanity_check_lru(&IndexQueue {
+        validate_lru(&IndexQueue {
             next: vec![Some(1), Some(1)],
             prev: vec![None, Some(0)],
             head: Some(0),
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     #[should_panic = "Cycle in prev pointers"]
     fn test_prev_cycle() {
-        sanity_check_lru(&IndexQueue {
+        validate_lru(&IndexQueue {
             next: vec![Some(1), None],
             prev: vec![Some(0), Some(0)],
             head: Some(0),
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     #[should_panic = "Forward traversal terminated early: not at tail"]
     fn test_array_tail_bad() {
-        sanity_check_lru(&IndexQueue {
+        validate_lru(&IndexQueue {
             next: vec![Some(1), None, None],
             prev: vec![None, Some(0), Some(1)],
             head: Some(0),
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     #[should_panic = "Backward traversal terminated early: not at head"]
     fn test_array_head_bad() {
-        sanity_check_lru(&IndexQueue {
+        validate_lru(&IndexQueue {
             next: vec![Some(1), Some(2), None],
             prev: vec![None, None, Some(1)],
             head: Some(0),
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn test_lru_remove_empty() {
         let mut queue = IndexQueue::new(10);
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
         assert_eq!(queue.pop_tail(), None);
     }
 
@@ -349,7 +349,7 @@ mod tests {
     fn test_lru_evict_one() {
         let mut queue = IndexQueue::new(10);
         queue.push_head(1);
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
         assert_eq!(queue.pop_tail(), Some(1));
         assert_eq!(queue.pop_tail(), None);
     }
@@ -361,17 +361,17 @@ mod tests {
         queue.push_head(2);
         queue.push_head(3);
         queue.push_head(4);
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
         assert_eq!(queue.pop_tail(), Some(1));
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
         assert_eq!(queue.pop_tail(), Some(2));
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
         assert_eq!(queue.pop_tail(), Some(3));
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
         assert_eq!(queue.pop_tail(), Some(4));
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
         assert_eq!(queue.pop_tail(), None);
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
     }
 
     #[test]
@@ -381,10 +381,10 @@ mod tests {
         queue.push_head(2);
         queue.push_head(3);
         queue.remove(2);
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
         assert_eq!(queue.pop_tail(), Some(1));
         assert_eq!(queue.pop_tail(), Some(3));
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
     }
 
     // Regression test
@@ -392,15 +392,15 @@ mod tests {
     fn test_lru_remove_head() {
         let mut queue = IndexQueue::new(10);
         queue.push_head(1);
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
         queue.push_head(2);
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
         queue.remove(2);
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
         assert_eq!(queue.pop_tail(), Some(1));
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
         assert_eq!(queue.pop_tail(), None);
-        sanity_check_lru(&queue);
+        validate_lru(&queue);
     }
 
     #[test]

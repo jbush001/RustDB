@@ -138,7 +138,7 @@ mod tests {
     use rand::{SeedableRng, RngExt};
     use super::*;
 
-    fn sanity_check_vararray(page: &PageData) {
+    fn validate_vararray(page: &PageData) {
         let mut sorted_rec_offs: Vec<(usize, usize)> = Vec::new();
 
         // Walk through the entries, put offss into a list.
@@ -177,22 +177,22 @@ mod tests {
         assert_eq!(last_entry_end, PAGE_SIZE, "Gap at end of entries");
     }
 
-    // Validate the sanity_check routine
+    // Validate the validate routine
     #[test]
     #[should_panic = "First offset field is incorrect"]
-    fn test_sanity_check_bad_offs() {
+    fn test_validate_bad_offs() {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
         page[DATA_START_FIELD_OFFS] += 1; // Adjust start of data field
 
-        sanity_check_vararray(&page);
+        validate_vararray(&page);
     }
 
-    // Validate the sanity_check routine
+    // Validate the validate routine
     #[test]
     #[should_panic = "Entry offset out of range"]
-    fn test_sanity_check_offset_out_of_range() {
+    fn test_validate_offset_out_of_range() {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
@@ -200,13 +200,13 @@ mod tests {
         insert_vararray_entry(&mut page, 1, b"bbbbb");
         set_u16(&mut page, OFFSETS_LOC + OFFSETS_ENTRY_SIZE, PAGE_SIZE as u16 + 1);
 
-        sanity_check_vararray(&page);
+        validate_vararray(&page);
     }
 
-    // Validate the sanity_check routine
+    // Validate the validate routine
     #[test]
     #[should_panic = "First entry offset is incorrect"]
-    fn test_sanity_incorrect_entry_offset() {
+    fn test_validate_incorrect_entry_offset() {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
@@ -215,13 +215,13 @@ mod tests {
 
         page[DATA_START_FIELD_OFFS] += 1; // Adjust start of data field
 
-        sanity_check_vararray(&page);
+        validate_vararray(&page);
     }
 
-    // Validate the sanity_check routine
+    // Validate the validate routine
     #[test]
     #[should_panic = "Entries are not packed"]
-    fn test_sanity_check_overlapping_entry() {
+    fn test_validate_overlapping_entry() {
         let mut page: PageData = [0; PAGE_SIZE];
         init_vararray(&mut page);
 
@@ -230,7 +230,7 @@ mod tests {
 
         page[OFFSETS_LOC + OFFSETS_ENTRY_SIZE + 2] += 1; // Increase the length by one byte
 
-        sanity_check_vararray(&page);
+        validate_vararray(&page);
     }
 
     #[test]
@@ -247,7 +247,7 @@ mod tests {
         assert_eq!(entry1, get_vararray_entry(&page, 0));
         assert_eq!(entry2, get_vararray_entry(&page, 1));
 
-        sanity_check_vararray(&page);
+        validate_vararray(&page);
     }
 
     #[test]
@@ -264,7 +264,7 @@ mod tests {
         assert_eq!(entry2, get_vararray_entry(&page, 0));
         assert_eq!(entry1, get_vararray_entry(&page, 1));
 
-        sanity_check_vararray(&page);
+        validate_vararray(&page);
     }
 
     #[test]
@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(entry2, get_vararray_entry(&page, 1));
         assert_eq!(entry0, get_vararray_entry(&page, 2));
 
-        sanity_check_vararray(&page);
+        validate_vararray(&page);
     }
 
     #[test]
@@ -303,7 +303,7 @@ mod tests {
         insert_vararray_entry(&mut page, 1, entry2);
         assert_eq!(get_vararray_free_space(&page), init_free_space - entry2.len() - OFFSETS_ENTRY_SIZE);
 
-        sanity_check_vararray(&page);
+        validate_vararray(&page);
     }
 
     #[test]
@@ -321,7 +321,7 @@ mod tests {
         let entry3 = b"ccc";
         insert_vararray_entry(&mut page, 3, entry3);
 
-        sanity_check_vararray(&page);
+        validate_vararray(&page);
     }
 
     #[test]
@@ -348,7 +348,7 @@ mod tests {
         // Remove first entry (aardvark)
         delete_vararray_entry(&mut page, 0);
         assert_eq!(get_num_vararray_entries(&page), 3);
-        sanity_check_vararray(&page);
+        validate_vararray(&page);
 
         assert_eq!(get_vararray_entry(&page, 0), b"apple");
         assert_eq!(get_vararray_entry(&page, 1), b"banana");
@@ -368,7 +368,7 @@ mod tests {
         // Remove from middle (apple)
         delete_vararray_entry(&mut page, 1);
         assert_eq!(get_num_vararray_entries(&page), 3);
-        sanity_check_vararray(&page);
+        validate_vararray(&page);
 
         assert_eq!(get_vararray_entry(&page, 0), b"aardvark");
         assert_eq!(get_vararray_entry(&page, 1), b"banana");
@@ -389,7 +389,7 @@ mod tests {
         // Remove last entry (zebra)
         delete_vararray_entry(&mut page, 3);
         assert_eq!(get_num_vararray_entries(&page), 3);
-        sanity_check_vararray(&page);
+        validate_vararray(&page);
 
         assert_eq!(get_vararray_entry(&page, 0), b"aardvark");
         assert_eq!(get_vararray_entry(&page, 1), b"apple");
@@ -408,7 +408,7 @@ mod tests {
         delete_vararray_entry(&mut page, 0);
         delete_vararray_entry(&mut page, 0);
         assert_eq!(get_num_vararray_entries(&page), 0);
-        sanity_check_vararray(&page);
+        validate_vararray(&page);
 
         assert_eq!(capacity, get_vararray_free_space(&page));
     }
@@ -466,7 +466,7 @@ mod tests {
             }
 
             // Validate
-            sanity_check_vararray(&page);
+            validate_vararray(&page);
             for i in 0..oracle.len() {
                 assert_eq!(get_vararray_entry(&page, i), &oracle[i]);
             }

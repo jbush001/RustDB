@@ -629,6 +629,23 @@ mod tests {
         (page_cache, allocator, collection, documents)
     }
 
+    const JSON_EXAMPLE: &str = r#"
+        {
+            "name": "Bob Dobalina",
+            "age": 45,
+            "phones": [
+                {
+                    "number": "867-5309",
+                    "type": "home"
+                },
+                {
+                    "number": "+15551212",
+                    "type": "mobile"
+                }
+            ]
+        }
+    "#;
+
     #[test]
     fn test_key_encodings() {
         assert!(encode_key(&json!("abc"), DocId(0)).unwrap() <
@@ -969,23 +986,6 @@ mod tests {
         let path = FieldPath::new("phones[1].number").unwrap();
         assert_eq!(path.to_string(), "phones[1].number");
     }
-
-    const JSON_EXAMPLE: &str = r#"
-        {
-            "name": "Bob Dobalina",
-            "age": 45,
-            "phones": [
-                {
-                    "number": "867-5309",
-                    "type": "home"
-                },
-                {
-                    "number": "+15551212",
-                    "type": "mobile"
-                }
-            ]
-        }
-    "#;
 
     #[test]
     fn test_lookup_field1() {
