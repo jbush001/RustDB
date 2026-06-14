@@ -178,7 +178,7 @@ impl WriteAheadLog {
             // Update the block data structure
             let offset = LH_PAGE_HDRS_OFFS + self.head * PAGE_HEADER_SIZE;
             set_u32(&mut self.header_data, offset, self.next_transaction_id);
-            set_u64(&mut self.header_data, offset + PH_FPID_OFFS, (*page_num).into());
+            set_u64(&mut self.header_data, offset + PH_FPID_OFFS, PageNum::to_disk(Some(*page_num)));
 
             // Write the block data itself to the log.
             let write_pnum = PageNum(self.log_start.0

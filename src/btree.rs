@@ -43,7 +43,7 @@ pub const MAX_RECORD_SIZE: usize = (PAGE_SIZE - 32) / 4 - 16; // I added a littl
 const FLAG_LEAF: u8 = 1;
 
 pub struct BTreeCursor {
-    current_node_pnum: PageNum,
+    current_node_pnum: Option<PageNum>,
     current_index: usize,
     reverse: bool,
     page_cache: PageCache
@@ -53,11 +53,11 @@ impl Iterator for BTreeCursor {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_node_pnum == PageNum::INVALID {
+        if self.current_node_pnum.is_none() {
             return None;
         }
 
-        let page = self.page_cache.lock_page(self.current_node_pnum);
+        let page = self.page_cache.lock_page(self.current_node_pnum.unwrap());
         let result = (
             get_entry_key(&page, self.current_index).to_vec(),
             get_entry_value(&page, self.current_index).to_vec()
@@ -66,8 +66,8 @@ impl Iterator for BTreeCursor {
         if self.reverse {
             if self.current_index == 0 {
                 self.current_node_pnum = get_prev_sib(&page);
-                if self.current_node_pnum != PageNum::INVALID {
-                    let page = self.page_cache.lock_page(self.current_node_pnum);
+                if let Some(cur) = self.current_node_pnum {
+                    let page = self.page_cache.lock_page(cur);
                     self.current_index = get_num_vararray_entries(&page) - 1;
                 }
             } else {
@@ -121,9 +121,10 @@ impl BTree {
                 if num_entries == 0 {
                     // Empty tree
                     assert!(current_node_pnum == self.root, "Empty page in tree");
-                    // Return a dummy cursor
+
+                    // Return a stub cursor that will immediately return None
                     return BTreeCursor {
-                        current_node_pnum: PageNum::INVALID,
+                        current_node_pnum: None,
                         current_index: 0,
                         reverse: false,
                         page_cache: page_cache.clone()
@@ -131,7 +132,7 @@ impl BTree {
                 }
 
                 return BTreeCursor {
-                    current_node_pnum,
+                    current_node_pnum: Some(current_node_pnum),
                     current_index: if reverse && num_entries > 0 { num_entries - 1 } else { 0 },
                     reverse,
                     page_cache: page_cache.clone()
@@ -139,15 +140,14 @@ impl BTree {
             }
 
             if reverse {
-                current_node_pnum = get_right_child(&page);
+                current_node_pnum = get_right_child(&page).expect("Right child is null");
             } else if get_num_vararray_entries(&page) > 0 {
-                current_node_pnum = PageNum(u64::from_le_bytes(get_entry_value(&page, 0)
-                    .try_into().expect("value was not 8 bytes")));
+                current_node_pnum = PageNum::from_bytes(get_entry_value(&page, 0))
+                    .expect("Invalid entry");
             } else {
                 // After a deletion, it's possible to have interior nodes
                 // that only have a right child.
-                assert!(get_right_child(&page) != PageNum::INVALID);
-                current_node_pnum = get_right_child(&page);
+                current_node_pnum = get_right_child(&page).expect("Right child is null");
             }
         }
     }
@@ -159,9 +159,9 @@ impl BTree {
             let index = find_key(&page, key);
             if is_leaf(&page) {
                 if (reverse && index == 0) || (!reverse && index == get_num_vararray_entries(&page)) {
-                    // Nothing to fetch, return dummy cursor
+                    // Nothing to fetch, return stub cursor
                     return BTreeCursor {
-                        current_node_pnum: PageNum::INVALID,
+                        current_node_pnum: None,
                         current_index: 0,
                         reverse,
                         page_cache: page_cache.clone()
@@ -169,7 +169,7 @@ impl BTree {
                 }
 
                 return BTreeCursor {
-                    current_node_pnum,
+                    current_node_pnum: Some(current_node_pnum),
                     current_index: if reverse { index - 1 } else { index },
                     reverse,
                     page_cache: page_cache.clone()
@@ -177,10 +177,10 @@ impl BTree {
             }
 
             if index == get_num_vararray_entries(&page) {
-                current_node_pnum = get_right_child(&page);
+                current_node_pnum = get_right_child(&page).expect("Right child is null");
             } else {
-                current_node_pnum = PageNum(u64::from_le_bytes(get_entry_value(&page, index)
-                    .try_into().expect("value was not 8 bytes")));
+                current_node_pnum = PageNum::from_bytes(get_entry_value(&page, index))
+                    .expect("invalid entry");
             }
         }
     }
@@ -201,14 +201,11 @@ impl BTree {
             }
 
             if index == get_num_vararray_entries(&page) {
-                current_node_pnum = get_right_child(&page);
+                current_node_pnum = get_right_child(&page).expect("Right child is null");
             } else {
-                current_node_pnum = PageNum(u64::from_le_bytes(get_entry_value(&page, index).try_into()
-                    .expect("value was not 8 bytes")));
+                current_node_pnum = PageNum::from_bytes(get_entry_value(&page, index))
+                    .expect("value was not 8 bytes");
             }
-
-            assert!(current_node_pnum != PageNum::INVALID,
-                "Interior node has non-leaf children");
         };
 
         (path, found)
@@ -251,8 +248,8 @@ impl BTree {
                 // The root node can be a leaf if the number of entries is small. If so,
                 // need to fix the linked list of nodes.
                 if is_leaf(&page) {
-                    set_next_sib(&mut new_page1, new_page_pnum2);
-                    set_prev_sib(&mut new_page2, new_page_pnum1);
+                    set_next_sib(&mut new_page1, Some(new_page_pnum2));
+                    set_prev_sib(&mut new_page2, Some(new_page_pnum1));
                 } else {
                     set_not_leaf(&mut new_page1);
                     set_not_leaf(&mut new_page2);
@@ -270,8 +267,8 @@ impl BTree {
                 // "right_child" member, the other gets an entry with a key.
                 init_btree_node(&mut page);
                 set_not_leaf(&mut page); // If the root was a leaf, it is not now.
-                append_entry(&mut page, &split_key, &new_page_pnum1.0.to_le_bytes());
-                set_right_child(&mut page, new_page_pnum2);
+                append_entry(&mut page, &split_key, &PageNum::to_bytes(Some(new_page_pnum1)));
+                set_right_child(&mut page, Some(new_page_pnum2));
                 break;
             } else {
                 // Split leaf or interior page.
@@ -284,15 +281,15 @@ impl BTree {
                 // area for what will be copied back to this page.
 
                 if is_leaf(&page) {
-                    set_prev_sib(&mut temp, new_page_pnum);
+                    set_prev_sib(&mut temp, Some(new_page_pnum));
                     set_next_sib(&mut temp, get_next_sib(&page));
                     set_prev_sib(&mut new_page, get_prev_sib(&page));
-                    set_next_sib(&mut new_page, *node_pnum);
+                    set_next_sib(&mut new_page, Some(*node_pnum));
 
                     // Need to fix forward link
-                    if get_prev_sib(&page) != PageNum::INVALID {
-                        let mut prev_sib_page = page_cache.lock_page_mut(get_prev_sib(&page));
-                        set_next_sib(&mut prev_sib_page, new_page_pnum);
+                    if let Some(prev) = get_prev_sib(&page) {
+                        let mut prev_sib_page = page_cache.lock_page_mut(prev);
+                        set_next_sib(&mut prev_sib_page, Some(new_page_pnum));
                     }
                 } else {
                     set_not_leaf(&mut new_page);
@@ -330,13 +327,12 @@ impl BTree {
                 // Need to remove right child. Remove it and set the next highest
                 // entry in the node to be the new right child (if possible)
                 if num_entries > 0 {
-                    let nu_right = PageNum(u64::from_le_bytes(get_entry_value(
-                        &page, num_entries - 1).try_into()
-                        .expect("value was not 8 bytes")));
-                    set_right_child(&mut page, nu_right);
+                    let nu_right = PageNum::from_bytes(get_entry_value(
+                        &page, num_entries - 1)).expect("invalid entry");
+                    set_right_child(&mut page, Some(nu_right));
                     delete_vararray_entry(&mut page, num_entries - 1);
                 } else {
-                    set_right_child(&mut page, PageNum::INVALID);
+                    set_right_child(&mut page, None);
                 }
 
                 // Otherwise this node is truly empty. We will continue up
@@ -361,7 +357,7 @@ impl BTree {
             // right child, since we don't know the key here. As such, we don't
             // do that for simplicity.
             if get_num_vararray_entries(&page) != 0
-                || (!is_leaf(&page) && get_right_child(&page) != PageNum::INVALID) {
+                || (!is_leaf(&page) && get_right_child(&page).is_some()) {
                 break; // Is not empty, we are done for now.
             }
 
@@ -369,13 +365,13 @@ impl BTree {
             // iteration will remove its entry from its parent.
             if is_leaf(&page) {
                 // Remove from the linked list
-                if get_prev_sib(&page) != PageNum::INVALID {
-                    let mut prev_page = page_cache.lock_page_mut(get_prev_sib(&page));
+                if let Some(prev) = get_prev_sib(&page) {
+                    let mut prev_page = page_cache.lock_page_mut(prev);
                     set_next_sib(&mut prev_page, get_next_sib(&page));
                 }
 
-                if get_next_sib(&page) != PageNum::INVALID {
-                    let mut next_page = page_cache.lock_page_mut(get_next_sib(&page));
+                if let Some(next) = get_next_sib(&page) {
+                    let mut next_page = page_cache.lock_page_mut(next);
                     set_prev_sib(&mut next_page, get_prev_sib(&page));
                 }
             }
@@ -390,8 +386,8 @@ impl BTree {
         while !fifo.is_empty() {
             let page_num = fifo.remove(0);
             let page = page_cache.lock_page(page_num);
-            println!("Node page_num {:?} is_leaf {} prev_sib {} next_sib {} right_child {}",
-                page_num, is_leaf(&page), get_prev_sib(&page).0, get_next_sib(&page).0, get_right_child(&page).0);
+            println!("Node page_num {:?} is_leaf {} prev_sib {:?} next_sib {:?} right_child {:?}",
+                page_num, is_leaf(&page), get_prev_sib(&page), get_next_sib(&page), get_right_child(&page));
 
             if is_leaf(&page) {
                 for i in 0..get_num_vararray_entries(&page) {
@@ -401,15 +397,15 @@ impl BTree {
                 }
             } else {
                 for i in 0..get_num_vararray_entries(&page) {
-                    let child_pnum = u64::from_le_bytes(get_entry_value(&page, i).try_into()
-                        .expect("value was not 8 bytes"));
-                    println!("{}. {} child page {}", i,
+                    let child_pnum = PageNum::from_bytes(get_entry_value(&page, i))
+                        .expect("Invalid entry");
+                    println!("{}. {} child page {:?}", i,
                         to_hex_string(get_entry_key(&page, i), 16), child_pnum);
-                    fifo.push(PageNum(child_pnum));
+                    fifo.push(child_pnum);
                 }
 
-                if get_right_child(&page) != PageNum::INVALID {
-                    fifo.push(get_right_child(&page));
+                if let Some(child) = get_right_child(&page) {
+                    fifo.push(child);
                 }
             }
         }
@@ -420,9 +416,9 @@ impl BTree {
 pub fn init_btree_node(page: &mut PageData) {
     init_vararray(page);
     page[0] = FLAG_LEAF;
-    set_next_sib(page, PageNum::INVALID);
-    set_prev_sib(page, PageNum::INVALID);
-    set_right_child(page, PageNum::INVALID);
+    set_next_sib(page, None);
+    set_prev_sib(page, None);
+    set_right_child(page, None);
 }
 
 fn is_leaf(page: &PageData) -> bool {
@@ -437,31 +433,28 @@ fn set_not_leaf(page: &mut PageData) {
     page[0] &= !FLAG_LEAF;
 }
 
-fn get_next_sib(page: &PageData) -> PageNum {
-    PageNum(get_u64(page, HEADER_NEXT_SIB_OFFS))
+fn get_next_sib(page: &PageData) -> Option<PageNum> {
+    PageNum::from_disk(get_u64(page, HEADER_NEXT_SIB_OFFS))
 }
 
-fn set_next_sib(page: &mut PageData, page_num: PageNum) {
-    assert!(page_num.0 != 0);
-    set_u64(&mut page[..], HEADER_NEXT_SIB_OFFS, page_num.into());
+fn set_next_sib(page: &mut PageData, page_num: Option<PageNum>) {
+    set_u64(&mut page[..], HEADER_NEXT_SIB_OFFS, PageNum::to_disk(page_num));
 }
 
-fn get_prev_sib(page: &PageData) -> PageNum {
-    PageNum(get_u64(page, HEADER_PREV_SIB_OFFS))
+fn get_prev_sib(page: &PageData) -> Option<PageNum> {
+    PageNum::from_disk(get_u64(page, HEADER_PREV_SIB_OFFS))
 }
 
-fn set_prev_sib(page: &mut PageData, page_num: PageNum) {
-    assert!(page_num.0 != 0);
-    set_u64(&mut page[..], HEADER_PREV_SIB_OFFS, page_num.into());
+fn set_prev_sib(page: &mut PageData, page_num: Option<PageNum>) {
+    set_u64(&mut page[..], HEADER_PREV_SIB_OFFS,  PageNum::to_disk(page_num));
 }
 
-fn get_right_child(page: &PageData) -> PageNum {
-    PageNum(get_u64(page, HEADER_RIGHT_CHILD_OFFS))
+fn get_right_child(page: &PageData) -> Option<PageNum> {
+    PageNum::from_disk(get_u64(page, HEADER_RIGHT_CHILD_OFFS))
 }
 
-fn set_right_child(page: &mut PageData, page_num: PageNum) {
-    assert!(page_num.0 != 0);
-    set_u64(&mut page[..], HEADER_RIGHT_CHILD_OFFS, page_num.into());
+fn set_right_child(page: &mut PageData, page_num: Option<PageNum>) {
+    set_u64(&mut page[..], HEADER_RIGHT_CHILD_OFFS, PageNum::to_disk(page_num));
 }
 
 fn get_entry_size(key: &[u8], value: &[u8]) -> usize {
@@ -474,12 +467,16 @@ fn get_entry_size(key: &[u8], value: &[u8]) -> usize {
 fn get_entry_key(page: &PageData, rec_num: usize) -> &[u8] {
     let rec = get_vararray_entry(page, rec_num);
     let key_len = get_u16(rec, 0) as usize;
+    assert!(key_len + 2 <= rec.len(),
+        "Invalid key length, exceeds record length");
     &rec[2..2 + key_len]
 }
 
 fn get_entry_value(page: &PageData, rec_num: usize) -> &[u8] {
     let rec = get_vararray_entry(page, rec_num);
     let key_len = get_u16(rec, 0) as usize;
+    assert!(key_len + 2 <= rec.len(),
+        "Invalid key length, exceeds record length");
     &rec[2 + key_len..]
 }
 
@@ -494,6 +491,8 @@ fn get_entry_value(page: &PageData, rec_num: usize) -> &[u8] {
 //   in the table.
 //
 fn find_key(page: &PageData, key: &[u8]) -> usize {
+    assert!(key.len() > 0, "Find with empty key");
+
     let mut low = 0;
     let mut high = get_num_vararray_entries(page);
     while low < high {
@@ -511,6 +510,8 @@ fn find_key(page: &PageData, key: &[u8]) -> usize {
 
 // Insert a entry into a single page.
 fn insert_entry(page: &mut PageData, key: &[u8], value: &[u8]) {
+    assert!(key.len() + value.len() < MAX_RECORD_SIZE);
+
     let index = find_key(page, key);
     assert!(index == get_num_vararray_entries(page) || get_entry_key(page, index) != key,
         "Duplicate key inserted");
@@ -565,8 +566,7 @@ fn split_node(orig: &PageData, out1: &mut PageData, out2: &mut PageData) -> Vec<
         // Remove the separator key, which will go into the parent. Save its
         // node pointer into the right child of the left node.
         let separator = get_entry_key(orig, orig_index).to_vec();
-        set_right_child(out1, PageNum(u64::from_le_bytes(get_entry_value(orig, orig_index)
-            .try_into().expect("value was not 8 bytes"))));
+        set_right_child(out1, PageNum::from_bytes(get_entry_value(orig, orig_index)));
         orig_index += 1;
 
         separator
@@ -583,7 +583,6 @@ fn split_node(orig: &PageData, out1: &mut PageData, out2: &mut PageData) -> Vec<
 
     separator
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -673,17 +672,18 @@ mod tests {
             }
 
             if !is_leaf(&page) {
+                assert!(get_right_child(&page).is_some(), "Right child is null");
+
                 for i in 0..num_entries {
-                    let child_page_num = PageNum(u64::from_le_bytes(
-                        get_entry_value(&page, i).try_into().expect(
-                        "Bad value in node")));
+                    let child_page_num = PageNum::from_bytes(get_entry_value(&page, i))
+                        .expect("Invalid entry");
                     let low_key = if i > 0 { Some(get_entry_key(&page, i - 1)) } else { None };
                     let high_key = Some(get_entry_key(&page, i));
 
                     walk_tree(child_page_num, page_cache, low_key, high_key, false);
                 }
 
-                walk_tree(get_right_child(&page), page_cache,
+                walk_tree(get_right_child(&page).expect("Invalid right child"), page_cache,
                     Some(get_entry_key(&page, num_entries - 1)), None, false);
             }
         }
@@ -715,7 +715,7 @@ mod tests {
             set_not_leaf(&mut root_page);
 
             append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
-            set_right_child(&mut root_page, child_page2_num);
+            set_right_child(&mut root_page, Some(child_page2_num));
 
             append_entry(&mut child_page1, b"bbnana", b"foo"); // Err, past parent key
             append_entry(&mut child_page2, b"cabana", b"foo");
@@ -742,7 +742,7 @@ mod tests {
             set_not_leaf(&mut root_page);
 
             append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
-            set_right_child(&mut root_page, child_page2_num);
+            set_right_child(&mut root_page, Some(child_page2_num));
 
             append_entry(&mut child_page1, b"abacus", b"foo");
             append_entry(&mut child_page2, b"aardvark", b"foo"); // Err, before last parent key
@@ -769,7 +769,7 @@ mod tests {
             set_not_leaf(&mut root_page);
 
             append_entry(&mut root_page, b"banana", &child_page1_num.0.to_le_bytes());
-            set_right_child(&mut root_page, child_page2_num);
+            set_right_child(&mut root_page, Some(child_page2_num));
         }
 
         validate_btree(&tree, &page_cache);
@@ -906,9 +906,8 @@ mod tests {
         let orig_sep_index = get_num_vararray_entries(&node2);
         assert_eq!(&separator_key, &get_entry_key(&node1, orig_sep_index));
 
-        assert_eq!(get_right_child(&node2), PageNum(u64::from_le_bytes(
-            get_entry_value(&node1, orig_sep_index)
-            .try_into().expect("value was not 8 bytes"))));
+        assert_eq!(get_right_child(&node2), PageNum::from_bytes(
+            get_entry_value(&node1, orig_sep_index)));
         assert_eq!(get_right_child(&node3), get_right_child(&node1));
 
         // Ensure all entries are present and in order
@@ -1004,8 +1003,7 @@ mod tests {
         let mut i = 0;
         for (key, val) in tree.iterate(false, &page_cache) {
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(u64::from_le_bytes(val.try_into()
-                .expect("value was not 8 bytes")), i as u64);
+            assert_eq!(PageNum::from_bytes(&val).expect("bad value"), PageNum(i as u64));
             i += 1;
         }
     }
@@ -1019,8 +1017,7 @@ mod tests {
         for i in (0..NUM_TEST_ENTRIES).rev() {
             let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(u64::from_le_bytes(val.try_into()
-                .expect("value was not 8 bytes")), i as u64);
+            assert_eq!(PageNum::from_bytes(&val).expect("bad value"), PageNum(i as u64));
         }
 
         assert_eq!(cursor.next(), None);
@@ -1035,8 +1032,7 @@ mod tests {
         for i in START_KEY_IDX..START_KEY_IDX + 10 {
             let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), &gen_key_for_index(i));
-            assert_eq!(u64::from_le_bytes(val.try_into()
-                .expect("value was not 8 bytes")), i as u64);
+            assert_eq!(PageNum::from_bytes(&val).expect("bad value"), PageNum(i as u64));
         }
     }
 
@@ -1048,8 +1044,7 @@ mod tests {
         let mut cursor = tree.find(&[0u8], false, &page_cache);
         let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
         assert_eq!(key.as_slice(), &gen_key_for_index(0));
-        assert_eq!(u64::from_le_bytes(val.try_into()
-                .expect("value was not 8 bytes")), 0u64);
+            assert_eq!(PageNum::from_bytes(&val).expect("bad value"), PageNum(0));
     }
 
     // Key is before first key and going in reverse. Nothing to fetch.
@@ -1090,8 +1085,7 @@ mod tests {
 
             let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(u64::from_le_bytes(val.try_into()
-                .expect("value was not 8 bytes")), i as u64);
+            assert_eq!(PageNum::from_bytes(&val).expect("bad value"), PageNum(i as u64));
         }
 
         assert!(cursor.next().is_none());
@@ -1114,8 +1108,7 @@ mod tests {
         for i in 0..NUM_TEST_ENTRIES {
             let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(u64::from_le_bytes(val.try_into()
-                .expect("value was not 8 bytes")), i as u64);
+            assert_eq!(PageNum::from_bytes(&val).expect("bad value"), PageNum(i as u64));
         }
     }
 

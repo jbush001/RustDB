@@ -35,13 +35,34 @@ pub type PageData = [u8; PAGE_SIZE];
 pub struct PageNum(pub u64);
 
 impl PageNum {
-    pub const INVALID: Self = PageNum(u64::MAX);
-}
+    // This value is stored on disk to delimit linked lists or indicate a field
+    // doesn't have a value.
+    const INVALID: u64 = u64::MAX;
 
-impl From<PageNum> for u64 {
-    #[inline]
-    fn from(id: PageNum) -> Self {
-        id.0
+    pub fn from_disk(val: u64) -> Option<Self> {
+        if val == Self::INVALID {
+            None
+        } else {
+            Some(PageNum(val))
+        }
+    }
+
+    pub fn to_disk(page_num: Option<Self>) -> u64 {
+        match page_num {
+            Some(PageNum(val)) => val,
+            None => Self::INVALID,
+        }
+    }
+
+    pub fn from_bytes(raw: &[u8]) -> Option<Self> {
+        Self::from_disk(u64::from_le_bytes(raw.try_into().expect("value was not 8 bytes")))
+    }
+
+    pub fn to_bytes(page_num: Option<Self>) -> [u8; 8] {
+        match page_num {
+            Some(PageNum(val)) => val.to_le_bytes(),
+            None => [0xff; 8],
+        }
     }
 }
 
@@ -206,8 +227,7 @@ impl PageCacheInner {
         assert!(!writable || self.transaction_active);
         assert!(page_num.0 == 0 || page_num.0 > LOG_PAGES as u64,
             "Attempt to lock page in write ahead log");
-        assert!(page_num != PageNum::INVALID,
-            "Attempt to lock invalid page");
+        assert!(page_num.0 != u64::MAX, "Attempt to lock invalid page");
 
         let entry = self.page_map.get(&page_num);
         match entry {
@@ -516,7 +536,7 @@ mod tests {
     #[should_panic = "Attempt to lock invalid page"]
     fn test_invalid_page() {
         let (_mock_io, page_cache) = setup_cache(5);
-        let _guard = page_cache.lock_page(PageNum::INVALID);
+        let _guard = page_cache.lock_page(PageNum(u64::MAX));
     }
 
     #[test]

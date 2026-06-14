@@ -37,7 +37,7 @@ pub const SUPERBLOCK_FPID: PageNum = PageNum(0);
 pub fn init_superblock(page: &mut PageData) {
     let block = get_superblock_mut(page);
     block.magic.copy_from_slice(SUPERBLOCK_MAGIC);
-    block.free_list_head = PageNum::INVALID.0;
+    block.free_list_head = PageNum::to_disk(None);
     block.file_size = LOG_PAGES as u64 + 2;
 }
 

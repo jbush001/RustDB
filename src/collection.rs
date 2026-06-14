@@ -134,19 +134,19 @@ impl Collection {
             set_u64(&mut pointer, 1, content.len() as u64 - 1);
 
             let mut offset = 1; // Skip the flag byte we speculatively added
-            let mut page_num = page_allocator.alloc();
-            set_u64(&mut pointer, 9, page_num.into());
+            let mut page_num = Some(page_allocator.alloc());
+            set_u64(&mut pointer, 9, PageNum::to_disk(page_num));
             while offset < content.len() {
-                let mut page = page_cache.lock_page_mut(page_num);
+                let mut page = page_cache.lock_page_mut(page_num.expect("null page num"));
                 let to_copy = std::cmp::min(content.len() - offset, PAGE_SIZE - 8);
                 page[8..8 + to_copy].copy_from_slice(&content[offset..offset + to_copy]);
                 page_num = if offset + to_copy < content.len() {
-                    page_allocator.alloc()
+                    Some(page_allocator.alloc())
                 } else {
-                    PageNum::INVALID
+                    None
                 };
 
-                set_u64(&mut page[..], 0, page_num.into());
+                set_u64(&mut page[..], 0, PageNum::to_disk(page_num));
                 offset += to_copy;
             }
 
@@ -245,12 +245,12 @@ impl Collection {
 
         // Free overflow pages if present
         if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
-            let mut current_pnum = PageNum(get_u64(&document_bytes, 9));
-            while current_pnum != PageNum::INVALID {
-                let page = page_cache.lock_page(current_pnum);
-                let next_page = PageNum(get_u64(&page[..], 0));
+            let mut current_pnum = PageNum::from_disk(get_u64(&document_bytes, 9));
+            while let Some(pnum) = current_pnum {
+                let page = page_cache.lock_page(pnum);
+                let next_page = PageNum::from_disk(get_u64(&page[..], 0));
                 drop(page);
-                page_allocator.free(current_pnum);
+                page_allocator.free(pnum);
                 current_pnum = next_page;
             }
         }
@@ -272,16 +272,16 @@ fn get_document_body(document_bytes: &[u8], page_cache: &PageCache) -> Value {
     if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
         // This is using overflow pages
         let mut length = get_u64(document_bytes, 1) as usize;
-        let mut current_pnum = PageNum(get_u64(document_bytes, 9));
+        let mut current_pnum = PageNum::from_disk(get_u64(document_bytes, 9));
 
         let mut content = Vec::with_capacity(length);
         while length > 0 {
-            if current_pnum == PageNum::INVALID {
+            if current_pnum.is_none() {
                 panic!("Error: record truncated");
             }
 
-            let page = page_cache.lock_page(current_pnum);
-            current_pnum = PageNum(get_u64(&page[..], 0));
+            let page = page_cache.lock_page(current_pnum.unwrap());
+            current_pnum = PageNum::from_disk(get_u64(&page[..], 0));
             let to_copy = std::cmp::min(length, PAGE_SIZE - 8);
             content.extend_from_slice(&page[8..8 + to_copy]);
             length -= to_copy;
@@ -1253,7 +1253,7 @@ mod tests {
         // XXX hack hard coded page address
         {
             let mut page = page_cache.lock_page_mut(PageNum(page_num.0 + 1));
-            set_u64(&mut page[..], 0, PageNum::INVALID.0);
+            set_u64(&mut page[..], 0, PageNum::to_disk(None));
         }
 
         SequentialScan::new(&collection, &page_cache).next();

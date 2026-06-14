@@ -26,7 +26,7 @@ use crate::util::*;
 pub struct PageAllocator {
     page_cache: PageCache,
     next_frontier: PageNum,
-    free_list_head: PageNum,
+    free_list_head: Option<PageNum>,
     pub total_allocs: usize,
     pub total_frees: usize
 }
@@ -42,7 +42,7 @@ impl PageAllocator {
         PageAllocator {
             page_cache,
             next_frontier: PageNum(superblock.file_size),
-            free_list_head: PageNum(superblock.free_list_head),
+            free_list_head: PageNum::from_disk(superblock.free_list_head),
             total_allocs: 0,
             total_frees: 0
         }
@@ -51,31 +51,30 @@ impl PageAllocator {
     pub fn alloc(&mut self) -> PageNum {
         self.total_allocs += 1;
 
-        if self.free_list_head != PageNum::INVALID {
-            let result = self.free_list_head;
+        if let Some(page_num) = self.free_list_head {
             {
-                let page = self.page_cache.lock_page(self.free_list_head);
-                self.free_list_head = PageNum(get_u64(&page[..], 0));
+                let page = self.page_cache.lock_page(page_num);
+                self.free_list_head = PageNum::from_disk(get_u64(&page[..], 0));
             }
 
             let mut page = self.page_cache.lock_page_mut(SUPERBLOCK_FPID);
             let superblock = get_superblock_mut(&mut page);
-            superblock.free_list_head = self.free_list_head.0;
+            superblock.free_list_head = PageNum::to_disk(self.free_list_head);
 
-            assert!(result.0 >= LOG_PAGES as u64 + 2);
+            assert!(page_num.0 >= LOG_PAGES as u64 + 2);
 
-            result
+            page_num
         } else {
             // Carve off frontier
-            let result = self.next_frontier;
+            let page_num = self.next_frontier;
             self.next_frontier.0 += 1;
             let mut page = self.page_cache.lock_page_mut(SUPERBLOCK_FPID);
             let superblock = get_superblock_mut(&mut page);
             superblock.file_size = self.next_frontier.0;
 
-            assert!(result.0 >= LOG_PAGES as u64 + 2);
+            assert!(page_num.0 >= LOG_PAGES as u64 + 2);
 
-            result
+            page_num
         }
     }
 
@@ -86,13 +85,13 @@ impl PageAllocator {
 
         {
             let mut page = self.page_cache.lock_page_mut(page_num);
-            set_u64(&mut page[..], 0, self.free_list_head.0);
-            self.free_list_head = page_num;
+            set_u64(&mut page[..], 0, PageNum::to_disk(self.free_list_head));
+            self.free_list_head = Some(page_num);
         }
 
         let mut page = self.page_cache.lock_page_mut(SUPERBLOCK_FPID);
         let superblock = get_superblock_mut(&mut page);
-        superblock.free_list_head = self.free_list_head.0;
+        superblock.free_list_head = PageNum::to_disk(self.free_list_head);
     }
 }
 
