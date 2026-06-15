@@ -42,7 +42,7 @@ impl PageAllocator {
         PageAllocator {
             page_cache,
             next_frontier: PageNum::from_u64(superblock.file_size),
-            free_list_head: PageNum::from_encoded(superblock.free_list_head),
+            free_list_head: PageNum::from_bytes(page.u64_field(8)),
             total_allocs: 0,
             total_frees: 0
         }
@@ -54,12 +54,11 @@ impl PageAllocator {
         if let Some(page_num) = self.free_list_head {
             {
                 let page = self.page_cache.lock_page(page_num);
-                self.free_list_head = PageNum::from_encoded(get_u64(&page[..], 0));
+                self.free_list_head = PageNum::from_bytes(page.u64_field(0));
             }
 
             let mut page = self.page_cache.lock_page_mut(SUPERBLOCK_FPID);
-            let superblock = get_superblock_mut(&mut page);
-            superblock.free_list_head = self.free_list_head.to_encoded();
+            *page.u64_field_mut(8) = self.free_list_head.to_bytes(); // free_list_head
 
             assert!(page_num.as_u64() >= LOG_PAGES as u64 + 2);
 
@@ -85,13 +84,12 @@ impl PageAllocator {
 
         {
             let mut page = self.page_cache.lock_page_mut(page_num);
-            set_u64(&mut page[..], 0, self.free_list_head.to_encoded());
+            *page.u64_field_mut(0) = self.free_list_head.to_bytes();
             self.free_list_head = Some(page_num);
         }
 
         let mut page = self.page_cache.lock_page_mut(SUPERBLOCK_FPID);
-        let superblock = get_superblock_mut(&mut page);
-        superblock.free_list_head = self.free_list_head.to_encoded();
+        *page.u64_field_mut(8) = self.free_list_head.to_bytes(); // free_list_head
     }
 }
 

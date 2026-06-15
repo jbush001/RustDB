@@ -39,16 +39,10 @@ impl PageNum {
     // doesn't have a value.
     const INVALID: u64 = u64::MAX;
 
-    pub fn from_encoded(val: u64) -> Option<Self> {
-        if val == Self::INVALID {
-            None
-        } else {
-            Some(PageNum(val))
-        }
-    }
-
-    pub fn from_bytes(raw: &[u8]) -> Option<Self> {
-        Self::from_encoded(u64::from_le_bytes(raw.try_into().expect("value was not 8 bytes")))
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let bytes: [u8; 8] = bytes[..8].try_into().expect("Invalid page num in from_bytes");
+        let val = u64::from_le_bytes(bytes);
+        if val == Self::INVALID { None } else { Some(Self(val)) }
     }
 
     pub fn to_bytes(self) -> [u8; 8] {
@@ -56,6 +50,9 @@ impl PageNum {
     }
 
     pub const fn from_u64(val: u64) -> Self {
+        // The INVALID pattern is only stored on disk, and is represented
+        // internally with Option.
+        assert!(val != Self::INVALID, "Invalid page num");
         PageNum(val)
     }
 
@@ -65,20 +62,15 @@ impl PageNum {
 }
 
 pub trait PageNumOptionExt {
-    fn to_encoded(&self) -> u64;
     fn to_bytes(&self) -> [u8; 8];
 }
 
 impl PageNumOptionExt for Option<PageNum> {
-    fn to_encoded(&self) -> u64 {
-        match self {
-            Some(PageNum(val)) => *val,
-            None => PageNum::INVALID,
-        }
-    }
-
     fn to_bytes(&self) -> [u8; 8] {
-        self.to_encoded().to_le_bytes()
+        match self {
+            Some(PageNum(val)) => val.to_le_bytes(),
+            None => PageNum::INVALID.to_le_bytes(),
+        }
     }
 }
 
@@ -546,13 +538,6 @@ mod tests {
         let mut readback: PageData = [0; PAGE_SIZE];
         mock_io.borrow_mut().read(PageNum::from_u64(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
-    }
-
-    #[test]
-    #[should_panic = "Attempt to lock invalid page"]
-    fn test_invalid_page() {
-        let (_mock_io, page_cache) = setup_cache(5);
-        let _guard = page_cache.lock_page(PageNum::from_u64(u64::MAX));
     }
 
     #[test]

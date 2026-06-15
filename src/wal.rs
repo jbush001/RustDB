@@ -14,8 +14,8 @@
 //   limitations under the License.
 //
 
-use crate::util::*;
 use crate::page_cache::*;
+use crate::util::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -178,7 +178,7 @@ impl WriteAheadLog {
             // Update the block data structure
             let offset = LH_PAGE_HDRS_OFFS + self.head * PAGE_HEADER_SIZE;
             set_u32(&mut self.header_data, offset, self.next_transaction_id);
-            set_u64(&mut self.header_data, offset + PH_FPID_OFFS, Some(*page_num).to_encoded());
+            *self.header_data.u64_field_mut(offset + PH_FPID_OFFS) = page_num.to_bytes();
 
             // Write the block data itself to the log.
             let write_pnum = PageNum::from_u64(self.log_start.as_u64()

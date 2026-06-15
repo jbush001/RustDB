@@ -432,27 +432,27 @@ fn set_not_leaf(page: &mut PageData) {
 }
 
 fn get_next_sib(page: &PageData) -> Option<PageNum> {
-    PageNum::from_encoded(get_u64(page, HEADER_NEXT_SIB_OFFS))
+    PageNum::from_bytes(page.u64_field(HEADER_NEXT_SIB_OFFS))
 }
 
 fn set_next_sib(page: &mut PageData, page_num: Option<PageNum>) {
-    set_u64(&mut page[..], HEADER_NEXT_SIB_OFFS, page_num.to_encoded());
+    *page.u64_field_mut(HEADER_NEXT_SIB_OFFS) = page_num.to_bytes();
 }
 
 fn get_prev_sib(page: &PageData) -> Option<PageNum> {
-    PageNum::from_encoded(get_u64(page, HEADER_PREV_SIB_OFFS))
+    PageNum::from_bytes(page.u64_field(HEADER_PREV_SIB_OFFS))
 }
 
 fn set_prev_sib(page: &mut PageData, page_num: Option<PageNum>) {
-    set_u64(&mut page[..], HEADER_PREV_SIB_OFFS, page_num.to_encoded());
+    *page.u64_field_mut(HEADER_PREV_SIB_OFFS) = page_num.to_bytes();
 }
 
 fn get_right_child(page: &PageData) -> Option<PageNum> {
-    PageNum::from_encoded(get_u64(page, HEADER_RIGHT_CHILD_OFFS))
+    PageNum::from_bytes(page.u64_field(HEADER_RIGHT_CHILD_OFFS))
 }
 
 fn set_right_child(page: &mut PageData, page_num: Option<PageNum>) {
-    set_u64(&mut page[..], HEADER_RIGHT_CHILD_OFFS, page_num.to_encoded());
+    *page.u64_field_mut(HEADER_RIGHT_CHILD_OFFS) = page_num.to_bytes();
 }
 
 fn get_entry_size(key: &[u8], value: &[u8]) -> usize {
@@ -1001,7 +1001,7 @@ mod tests {
         let mut i = 0;
         for (key, val) in tree.iterate(false, &page_cache) {
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(PageNum::from_bytes(&val), PageNum::from_encoded(i as u64));
+            assert_eq!(PageNum::from_bytes(&val).unwrap(), PageNum::from_u64(i as u64));
             i += 1;
         }
     }
@@ -1015,7 +1015,7 @@ mod tests {
         for i in (0..NUM_TEST_ENTRIES).rev() {
             let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(PageNum::from_bytes(&val),  PageNum::from_encoded(i as u64));
+            assert_eq!(PageNum::from_bytes(&val).unwrap(), PageNum::from_u64(i as u64));
         }
 
         assert_eq!(cursor.next(), None);
@@ -1030,7 +1030,7 @@ mod tests {
         for i in START_KEY_IDX..START_KEY_IDX + 10 {
             let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), &gen_key_for_index(i));
-            assert_eq!(PageNum::from_bytes(&val),  PageNum::from_encoded(i as u64));
+            assert_eq!(PageNum::from_bytes(&val).unwrap(),  PageNum::from_u64(i as u64));
         }
     }
 
@@ -1042,7 +1042,7 @@ mod tests {
         let mut cursor = tree.find(&[0u8], false, &page_cache);
         let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
         assert_eq!(key.as_slice(), &gen_key_for_index(0));
-            assert_eq!(PageNum::from_bytes(&val),  PageNum::from_encoded(0));
+            assert_eq!(PageNum::from_bytes(&val).unwrap(),  PageNum::from_u64(0));
     }
 
     // Key is before first key and going in reverse. Nothing to fetch.
@@ -1083,7 +1083,7 @@ mod tests {
 
             let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(PageNum::from_bytes(&val),  PageNum::from_encoded(i as u64));
+            assert_eq!(PageNum::from_bytes(&val).unwrap(),  PageNum::from_u64(i as u64));
         }
 
         assert!(cursor.next().is_none());
@@ -1106,7 +1106,7 @@ mod tests {
         for i in 0..NUM_TEST_ENTRIES {
             let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
-            assert_eq!(PageNum::from_bytes(&val),  PageNum::from_encoded(i as u64));
+            assert_eq!(PageNum::from_bytes(&val).unwrap(),  PageNum::from_u64(i as u64));
         }
     }
 
