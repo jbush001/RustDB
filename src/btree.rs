@@ -650,7 +650,8 @@ mod tests {
     // silent failure anyway, this would just give more diagnostics.
     fn validate_btree(root: &BTree, page_cache: &PageCache) {
         fn walk_tree(page_num: PageNum, page_cache: &PageCache, low_key: Option<&[u8]>,
-            high_key: Option<&[u8]>, is_root: bool) {
+            high_key: Option<&[u8]>, is_root: bool,
+            link_info: &mut Vec<(PageNum, Option<PageNum>, Option<PageNum>)>) {
             let page = page_cache.lock_page(page_num);
             let num_entries = get_num_vararray_entries(&page);
             if is_root && num_entries == 0 {
@@ -669,7 +670,9 @@ mod tests {
                     page_num);
             }
 
-            if !is_leaf(&page) {
+            if is_leaf(&page) {
+                link_info.push((page_num, get_prev_sib(&page), get_next_sib(&page)));
+            } else {
                 assert!(get_right_child(&page).is_some(), "Right child is null");
 
                 for i in 0..num_entries {
@@ -678,15 +681,25 @@ mod tests {
                     let low_key = if i > 0 { Some(get_entry_key(&page, i - 1)) } else { None };
                     let high_key = Some(get_entry_key(&page, i));
 
-                    walk_tree(child_page_num, page_cache, low_key, high_key, false);
+                    walk_tree(child_page_num, page_cache, low_key, high_key, false, link_info);
                 }
 
                 walk_tree(get_right_child(&page).expect("Invalid right child"), page_cache,
-                    Some(get_entry_key(&page, num_entries - 1)), None, false);
+                    Some(get_entry_key(&page, num_entries - 1)), None, false, link_info);
             }
         }
 
-        walk_tree(root.root, page_cache, None, None, true);
+        let mut link_info: Vec<(PageNum, Option<PageNum>, Option<PageNum>)> = Vec::new();
+        walk_tree(root.root, page_cache, None, None, true, &mut link_info);
+
+        if !link_info.is_empty() {
+            assert_eq!(link_info[0].1, None, "Bad prev pointer"); // Prev of first element is null
+            assert_eq!(link_info[link_info.len() - 1].2, None, "Bad next pointer"); // Next of last element is null.
+            for node in link_info.windows(2) {
+                assert_eq!(node[0].2, Some(node[1].0), "Bad next pointer"); // first.next = second
+                assert_eq!(node[1].1, Some(node[0].0), "Bad prev pointer"); // second.prev = first
+            }
+        }
     }
 
     #[test]
@@ -711,6 +724,8 @@ mod tests {
             init_btree_node(&mut child_page1);
             init_btree_node(&mut child_page2);
             set_not_leaf(&mut root_page);
+            set_next_sib(&mut child_page1, Some(child_page2_num));
+            set_prev_sib(&mut child_page2, Some(child_page1_num));
 
             append_entry(&mut root_page, b"banana", &child_page1_num.to_bytes());
             set_right_child(&mut root_page, Some(child_page2_num));
@@ -738,6 +753,8 @@ mod tests {
             init_btree_node(&mut child_page1);
             init_btree_node(&mut child_page2);
             set_not_leaf(&mut root_page);
+            set_next_sib(&mut child_page1, Some(child_page2_num));
+            set_prev_sib(&mut child_page2, Some(child_page1_num));
 
             append_entry(&mut root_page, b"banana", &child_page1_num.to_bytes());
             set_right_child(&mut root_page, Some(child_page2_num));
@@ -765,9 +782,67 @@ mod tests {
             init_btree_node(&mut child_page1);
             init_btree_node(&mut child_page2);
             set_not_leaf(&mut root_page);
+            set_next_sib(&mut child_page1, Some(child_page2_num));
+            set_prev_sib(&mut child_page2, Some(child_page1_num));
 
             append_entry(&mut root_page, b"banana", &child_page1_num.to_bytes());
             set_right_child(&mut root_page, Some(child_page2_num));
+        }
+
+        validate_btree(&tree, &page_cache);
+    }
+
+    #[test]
+    #[should_panic = "Bad next pointer"]
+    fn test_validate_bad_next() {
+        let (page_cache, mut allocator, tree) = create_test_btree();
+        {
+            let _transaction = page_cache.begin_transaction();
+            // Lock a page and alter the leaf key so it is larger than its parent.
+            let mut root_page = page_cache.lock_page_mut(tree.root);
+            let child_page1_num = allocator.alloc();
+            let mut child_page1 = page_cache.lock_page_mut(child_page1_num);
+            let child_page2_num = allocator.alloc();
+            let mut child_page2 = page_cache.lock_page_mut(child_page2_num);
+
+            init_btree_node(&mut child_page1);
+            init_btree_node(&mut child_page2);
+            set_not_leaf(&mut root_page);
+            set_prev_sib(&mut child_page2, Some(child_page1_num));
+
+            append_entry(&mut root_page, b"banana", &child_page1_num.to_bytes());
+            set_right_child(&mut root_page, Some(child_page2_num));
+
+            append_entry(&mut child_page1, b"abacus", b"foo");
+            append_entry(&mut child_page2, b"cencus", b"foo");
+        }
+
+        validate_btree(&tree, &page_cache);
+    }
+
+    #[test]
+    #[should_panic = "Bad prev pointer"]
+    fn test_validate_bad_prev() {
+        let (page_cache, mut allocator, tree) = create_test_btree();
+        {
+            let _transaction = page_cache.begin_transaction();
+            // Lock a page and alter the leaf key so it is larger than its parent.
+            let mut root_page = page_cache.lock_page_mut(tree.root);
+            let child_page1_num = allocator.alloc();
+            let mut child_page1 = page_cache.lock_page_mut(child_page1_num);
+            let child_page2_num = allocator.alloc();
+            let mut child_page2 = page_cache.lock_page_mut(child_page2_num);
+
+            init_btree_node(&mut child_page1);
+            init_btree_node(&mut child_page2);
+            set_not_leaf(&mut root_page);
+            set_next_sib(&mut child_page1, Some(child_page2_num));
+
+            append_entry(&mut root_page, b"banana", &child_page1_num.to_bytes());
+            set_right_child(&mut root_page, Some(child_page2_num));
+
+            append_entry(&mut child_page1, b"abacus", b"foo");
+            append_entry(&mut child_page2, b"cencus", b"foo");
         }
 
         validate_btree(&tree, &page_cache);
