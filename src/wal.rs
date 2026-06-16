@@ -196,6 +196,7 @@ impl WriteAheadLog {
     // Write the current header to disk and swap
     fn write_header(&mut self) {
         let header_seq = self.next_header_seq;
+        println!("writing header {}", header_seq & 1);
         self.next_header_seq = self.next_header_seq.wrapping_add(1);
         set_u32(&mut self.header_data, LH_SEQ_OFFS, header_seq);
         let sum = checksum(&self.header_data[4..]);
@@ -306,6 +307,37 @@ mod tests {
         assert_eq!(block, [0; PAGE_SIZE]);
         store.read(PageNum::from_u64(15), &mut block);
         assert_eq!(block, [0; PAGE_SIZE]);
+    }
+
+    // Force a checksum failure on header block A (coverage completeness)
+    #[test]
+    fn bad_header_a() {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> =
+            Rc::new(RefCell::new(MockPersistentStore::default()));
+
+        let mut log1 = WriteAheadLog::new(PageNum::from_u64(2), 10, &mock_io);
+        log1.log_transaction(&vec![
+            (PageNum::from_u64(13), [1; PAGE_SIZE]),
+            (PageNum::from_u64(15), [2; PAGE_SIZE])
+        ]);
+
+        // Copy header from first to second block, then clear first
+        let mut temp: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        mock_io.borrow_mut().read(PageNum::from_u64(2), &mut temp);
+        mock_io.borrow_mut().write(PageNum::from_u64(3), &temp);
+        mock_io.borrow_mut().write(PageNum::from_u64(2), &[0; PAGE_SIZE]);
+
+        // Reopen
+        let mut log2 = WriteAheadLog::new(PageNum::from_u64(2), 10, &mock_io);
+        log2.replay();
+
+        // Will replay the journal
+        let mut store = mock_io.borrow_mut();
+        let mut block: PageData = [0; PAGE_SIZE];
+        store.read(PageNum::from_u64(13), &mut block);
+        assert_eq!(block, [1u8; PAGE_SIZE]);
+        store.read(PageNum::from_u64(15), &mut block);
+        assert_eq!(block, [2u8; PAGE_SIZE]);
     }
 
     #[test]

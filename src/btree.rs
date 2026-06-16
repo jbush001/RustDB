@@ -1305,6 +1305,14 @@ mod tests {
 
         oracle.validate(tree.iterate(false, &page_cache));
         validate_btree(&tree, &page_cache);
+
+        // Delete all remaining entries, ensure nothing was leaked.
+        for (key, _) in oracle.entries {
+            let _transaction = page_cache.begin_transaction();
+            tree.delete(&key, &page_cache, &mut allocator);
+        }
+
+        assert!(allocator.total_allocs - allocator.total_frees < 2);
     }
 
     #[test]
@@ -1326,5 +1334,6 @@ mod tests {
         let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
         assert_eq!(key.as_slice(), b"abcd");
         assert_eq!(val.as_slice(), b"efg");
+        validate_btree(&tree, &page_cache);
     }
 }
