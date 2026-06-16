@@ -343,6 +343,7 @@ mod tests {
     use rand::rngs::{SmallRng};
     use rand::{SeedableRng, RngExt};
     use std::cell::RefCell;
+    use std::collections::HashSet;
     use std::rc::Rc;
     use super::*;
 
@@ -350,6 +351,44 @@ mod tests {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
         let page_cache = PageCache::new(capacity, Rc::clone(&mock_io));
         (mock_io, page_cache)
+    }
+
+    fn validate_page_cache(page_cache: &PageCache) {
+        let pci = page_cache.inner.borrow();
+        let dirty_pages: HashSet<usize> = pci.dirty_page_list.into_iter().collect();
+        let lru_pages: HashSet<usize> = pci.lru.into_iter().collect();
+        for (index, cp) in pci.pages.iter().enumerate() {
+            // Invariant 1: each cached page must be either in the LRU
+            // or dirty page list if its ref count is zero, otherwise
+            // it should be in neither.
+            if cp.ref_count == 0 {
+                // This looks a little odd, but it ensures the item is in eactly one
+                // of these lists.
+                assert!(dirty_pages.contains(&index) != lru_pages.contains(&index),
+                    "idle page queue state wrong");
+            } else {
+                assert!(!dirty_pages.contains(&index) && !lru_pages.contains(&index));
+            }
+
+            // Invariant 2: if the ref count is zero and a page is dirty, it should
+            // be in the dirty page list.
+            assert!(!cp.dirty || dirty_pages.contains(&index) || cp.ref_count > 0);
+
+            // Invariant 3a: if a page is in the hash map, it's physical pointer
+            // should match the hash key. If it is not in the hash map (which can
+            // happen after the page cache is initialized), it should be in the
+            // LRU.
+            if let Some(page_num) = cp.page_num {
+                assert_eq!(pci.page_map[&page_num], index);
+            } else {
+                assert!(lru_pages.contains(&index));
+            }
+        }
+
+        // Invariant 3b: check the hash map to ensure every entry in it has a page_num
+        for (page_num, index) in pci.page_map.iter() {
+            assert_eq!(pci.pages[*index].page_num, Some(*page_num));
+        }
     }
 
     #[test]
@@ -390,12 +429,14 @@ mod tests {
             // Read a page, set the wriable bit
             let mut guard = page_cache.lock_page_mut(PageNum::from_u64(100));
             *guard = [0xcc; PAGE_SIZE];
+            validate_page_cache(&page_cache);
         }
 
         // Unlocking will cause a writeback. Ensure the backing store is correct.
         let mut readback: PageData = [0; PAGE_SIZE];
         mock_io.borrow_mut().read(PageNum::from_u64(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
+        validate_page_cache(&page_cache);
     }
 
     // Cache hit is a different code path. This is a regression test.
@@ -410,6 +451,7 @@ mod tests {
 
             // Read a page, set the writable bit
             let _guard = page_cache.lock_page_mut(PageNum::from_u64(100));
+            validate_page_cache(&page_cache);
         }
 
         // Now lock the page again.
@@ -419,6 +461,7 @@ mod tests {
             // Read a page, set the writable bit
             let mut guard = page_cache.lock_page_mut(PageNum::from_u64(100));
             *guard = [0xcc; PAGE_SIZE];
+            validate_page_cache(&page_cache);
         }
 
         // Unlocking will cause a writeback.
@@ -426,6 +469,7 @@ mod tests {
         let mut readback: PageData = [0; PAGE_SIZE];
         mock_io.borrow_mut().read(PageNum::from_u64(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
+        validate_page_cache(&page_cache);
     }
 
     // it's possible within a transaction we will lock the same page twice for
@@ -438,13 +482,15 @@ mod tests {
         drop(guard1);
         let mut guard2 = page_cache.lock_page_mut(PageNum::from_u64(100));
         *guard2 = [0xcc; PAGE_SIZE];
+        validate_page_cache(&page_cache);
         drop(guard2);
-
+        validate_page_cache(&page_cache);
         drop(transaction);
 
         let mut readback: PageData = [0; PAGE_SIZE];
         mock_io.borrow_mut().read(PageNum::from_u64(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
+        validate_page_cache(&page_cache);
     }
 
     #[test]
@@ -467,6 +513,7 @@ mod tests {
         {
             let _transaction = page_cache.begin_transaction();
         }
+        validate_page_cache(&page_cache);
     }
 
     #[test]
@@ -498,7 +545,9 @@ mod tests {
         let page_cache = PageCache::new(10, Rc::clone(&mock_io));
         let _transaction = page_cache.begin_transaction();
         let _guard1 = page_cache.lock_page_mut(PageNum::from_u64(100));
+        validate_page_cache(&page_cache);
         let _guard2 = page_cache.lock_page_mut(PageNum::from_u64(100));
+        validate_page_cache(&page_cache);
     }
 
     // Lock first read, then write, ensure it gets written back
@@ -514,11 +563,13 @@ mod tests {
             let _guard1 = page_cache.lock_page(PageNum::from_u64(100));
             let mut guard = page_cache.lock_page_mut(PageNum::from_u64(100));
             *guard = [0xcc; PAGE_SIZE];
+            validate_page_cache(&page_cache);
         }
 
         let mut readback: PageData = [0; PAGE_SIZE];
         mock_io.borrow_mut().read(PageNum::from_u64(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
+        validate_page_cache(&page_cache);
     }
 
     // Ensure we don't clear the writable flag when relocking for read.
@@ -533,11 +584,13 @@ mod tests {
             *guard1 = [0xcc; PAGE_SIZE];
 
             let _guard2 = page_cache.lock_page(PageNum::from_u64(100));
+            validate_page_cache(&page_cache);
         }
 
         let mut readback: PageData = [0; PAGE_SIZE];
         mock_io.borrow_mut().read(PageNum::from_u64(100), &mut readback);
         assert_eq!(readback, [0xcc; PAGE_SIZE]);
+        validate_page_cache(&page_cache);
     }
 
     #[test]
@@ -563,6 +616,8 @@ mod tests {
             let mut guards: Vec<PageGuard> = Vec::new();
             let mut mut_guards: Vec<PageGuardMut> = Vec::new();
 
+            validate_page_cache(&page_cache);
+
             // Lock up to 5 pages.
             for _ in 0..rng.random_range(1..5) {
                 // Note the same file page may be locked multiple times (3.33% chance)
@@ -581,8 +636,12 @@ mod tests {
                 }
             }
 
+            validate_page_cache(&page_cache);
+
             // Note: guard are dropped here
         }
+
+        validate_page_cache(&page_cache);
 
         // Check all pages
         for page_num in LOG_PAGES + 1..LOG_PAGES + 1 + TOTAL_PAGES {
