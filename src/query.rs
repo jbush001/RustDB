@@ -63,23 +63,8 @@ impl std::fmt::Display for ExpressionNode {
     }
 }
 
-fn cast_to_bool(value: &Value) -> bool {
-    match value {
-        Value::Bool(b) => *b,
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                i != 0
-            } else if let Some(f) = n.as_f64() {
-                f != 0.0
-            } else {
-                false // Is this reachable?
-            }
-        },
-        Value::String(s) => !s.is_empty(),
-        Value::Array(arr) => !arr.is_empty(),
-        Value::Object(obj) => !obj.is_empty(),
-        Value::Null => false
-    }
+fn get_bool_result(value: &Value) -> Result<bool, String> {
+    value.as_bool().ok_or("Invalid type for boolean expr".to_string())
 }
 
 impl ExpressionNode {
@@ -112,6 +97,18 @@ impl ExpressionNode {
                         return Ok(Value::Bool(true));
                     }
 
+                    match operation {
+                        Operation::And => {
+                            return Ok(Value::Bool(get_bool_result(&left_val)?
+                                && get_bool_result(&right_val)?))
+                        },
+                        Operation::Or => {
+                            return Ok(Value::Bool(get_bool_result(&left_val)?
+                                || get_bool_result(&right_val)?))
+                        },
+                        _ => {} // Falls through
+                    }
+
                     let encoded_left = encode_key(&left_val, DocId(0))?;
                     let encoded_right = encode_key(&right_val, DocId(0))?;
                     match operation {
@@ -121,15 +118,6 @@ impl ExpressionNode {
                         Operation::Lte => Ok(Value::Bool(encoded_left <= encoded_right)),
                         Operation::Eq => Ok(Value::Bool(encoded_left == encoded_right)),
                         Operation::Neq => Ok(Value::Bool(encoded_left != encoded_right)),
-                        Operation::And => {
-                            Ok(Value::Bool(cast_to_bool(&left.eval(document)?)
-                                && cast_to_bool(&right.eval(document)?)))
-                        },
-                        Operation::Or => {
-                            Ok(Value::Bool(cast_to_bool(&left.eval(document)?)
-                                || cast_to_bool(&right.eval(document)?)))
-                        },
-
                         _ => { unreachable!(); }
                     }
                 }
@@ -149,8 +137,8 @@ impl Iterator for ExpressionFilter {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let (docid, doc) = self.source.next()?;
-            let result = self.expression.eval(&doc);
-            if cast_to_bool(&result.unwrap_or(Value::Bool(false))) {
+            let result = self.expression.eval(&doc).unwrap_or(Value::Bool(false));
+            if get_bool_result(&result).unwrap_or(false) {
                 return Some((docid, doc))
             }
         }
@@ -234,20 +222,15 @@ mod tests {
     }
 
     #[test]
-    fn test_cast_to_bool() {
-        assert_eq!(cast_to_bool(&json!(true)), true);
-        assert_eq!(cast_to_bool(&json!(false)), false);
-        assert_eq!(cast_to_bool(&json!(0)), false);
-        assert_eq!(cast_to_bool(&json!(1)), true);
-        assert_eq!(cast_to_bool(&json!(0.0)), false);
-        assert_eq!(cast_to_bool(&json!(0.1)), true);
-        assert_eq!(cast_to_bool(&json!("")), false);
-        assert_eq!(cast_to_bool(&json!("hello")), true);
-        assert_eq!(cast_to_bool(&json!([])), false);
-        assert_eq!(cast_to_bool(&json!([1])), true);
-        assert_eq!(cast_to_bool(&json!({})), false);
-        assert_eq!(cast_to_bool(&json!({"key": "value"})), true);
-        assert_eq!(cast_to_bool(&Value::Null), false);
+    fn  test_invalid_bool_and() {
+        let expr = ExpressionNode::BinaryOp((
+            Operation::And,
+            Box::new(ExpressionNode::Constant(json!(12))),
+            Box::new(ExpressionNode::Constant(Value::Bool(true)))
+        ));
+
+        assert_eq!(expr.eval(&json!({})),
+            Err("Invalid type for boolean expr".to_string()));
     }
 
     #[test]
@@ -336,7 +319,7 @@ mod tests {
 
                 assert_eq!(
                     expr.eval(&json!({})).unwrap(),
-                    left || right,
+                    Value::Bool(left || right),
                     "Failed for: {:?} AND {:?}", left, right
                 );
             }
