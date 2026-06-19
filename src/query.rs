@@ -43,6 +43,7 @@ impl std::fmt::Display for Operation {
     }
 }
 
+#[derive(Debug)]
 enum ExpressionNode {
     BinaryOp((Operation, Box<ExpressionNode>, Box<ExpressionNode>)),
     Path(FieldPath),
@@ -142,6 +143,45 @@ impl Iterator for ExpressionFilter {
                 return Some((docid, doc))
             }
         }
+    }
+}
+
+fn doc2expr(value: &Value) -> Result<ExpressionNode, String> {
+    if let Value::Array(vec) = value {
+        let operation = vec[0].as_str().ok_or("Invalid operation type".to_string())?;
+
+        // Check for unary ops
+        match operation {
+            "get" => {
+                return Ok(ExpressionNode::Path(FieldPath::new(vec[1].as_str()
+                    .ok_or(format!("Invalid field name {:?}", vec[1]))?)?));
+            },
+            "const" => {
+                return Ok(ExpressionNode::Constant(vec[1].clone()));
+            },
+            _ => {} // falls through
+        };
+
+        // Binary operation
+        let opcode = match operation {
+            "and" => Operation::And,
+            "or" => Operation::Or,
+            "gt" => Operation::Gt,
+            "ge" => Operation::Gte,
+            "lt" => Operation::Lt,
+            "le" => Operation::Lte,
+            "eq" => Operation::Eq,
+            "ne" => Operation::Neq,
+            _ => { return Err(format!("Bad operation {}", operation)); }
+        };
+
+        Ok(ExpressionNode::BinaryOp((
+            opcode,
+            Box::new(doc2expr(&value[1])?),
+            Box::new(doc2expr(&value[2])?),
+        )))
+    } else {
+        return Err(format!("Invalid expression {}", value));
     }
 }
 
@@ -467,5 +507,36 @@ mod tests {
         ));
 
         assert_eq!(expr.eval(&json!({})).unwrap_err(), "RHS of in expression must be an array".to_string());
+    }
+
+    #[test]
+    fn test_doc2expr() {
+        let expr = doc2expr(
+            &json!(["and", ["gt", ["get", "foo.bar"], ["const", 10]], ["le", ["get", "baz"], ["const", "boo"]]]));
+        assert_eq!(&expr.unwrap().to_string(), "((foo.bar > 10) and (baz <= \"boo\"))");
+    }
+
+    #[test]
+    fn test_doc2expr_invalid_field() {
+         assert_eq!(doc2expr(&json!(["get", "$---/>"])).unwrap_err(),
+            "Invalid path element: $---/>");
+    }
+
+    #[test]
+    fn test_invalid_op_type() {
+         assert_eq!(doc2expr(&json!([12])).unwrap_err(),
+            "Invalid operation type");
+    }
+
+    #[test]
+    fn test_invalid_operation() {
+         assert_eq!(doc2expr(&json!(["frobulate", 12])).unwrap_err(),
+            "Bad operation frobulate");
+    }
+
+    #[test]
+    fn test_invalid_type() {
+         assert_eq!(doc2expr(&json!(12)).unwrap_err(),
+            "Invalid expression 12");
     }
 }
