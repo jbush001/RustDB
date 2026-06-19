@@ -23,7 +23,7 @@ mod page_cache;
 mod query;
 mod superblock;
 mod util;
-mod vararray;
+mod slotted_page;
 mod wal;
 #[cfg(test)] mod mocks;
 
