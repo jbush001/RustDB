@@ -28,3 +28,5 @@ mod wal;
 #[cfg(test)] mod mocks;
 
 pub use database::Database;
+pub use query::*;
+pub use collection::FieldPath;

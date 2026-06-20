@@ -18,7 +18,7 @@ use crate::collection::*;
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
-enum Operation {
+pub enum Operation {
     Gt, Gte, Lt, Lte, Eq, Neq,
     And, Or,
     In, NotIn
@@ -44,7 +44,7 @@ impl std::fmt::Display for Operation {
 }
 
 #[derive(Debug)]
-enum ExpressionNode {
+pub enum ExpressionNode {
     BinaryOp((Operation, Box<ExpressionNode>, Box<ExpressionNode>)),
     Path(FieldPath),
     Constant(Value)
@@ -127,9 +127,18 @@ impl ExpressionNode {
     }
 }
 
-struct ExpressionFilter {
+pub struct ExpressionFilter {
     source: Box<dyn Iterator<Item = (DocId, Value)>>,
     expression: Box<ExpressionNode>
+}
+
+impl ExpressionFilter {
+    pub fn new(source: Box<dyn Iterator<Item = (DocId, Value)>>,
+         expression: Box<ExpressionNode>) -> Self {
+        Self {
+            source, expression
+        }
+    }
 }
 
 impl Iterator for ExpressionFilter {

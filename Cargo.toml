@@ -7,8 +7,8 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "doit"
-path = "examples/doit.rs"
+name = "yelp"
+path = "examples/yelp.rs"
 
 [dependencies]
 bytemuck = { version = "1.25.0", features = ["derive"] }
