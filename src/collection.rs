@@ -54,7 +54,7 @@ pub struct Collection {
 }
 
 impl Collection {
-    pub fn open(metadata: &Value) -> Self {
+    pub fn open(metadata: &Value, page_cache: &PageCache) -> Self {
         let mut indices: Vec<Index> = Vec::new();
         for index in metadata["indices"].as_array().expect("indices is not an array") {
             indices.push(Index{
@@ -65,11 +65,20 @@ impl Collection {
             });
         }
 
+        let document_tree = BTree::open(PageNum::from_u64(
+            metadata["root_page_pnum"].as_u64()
+            .expect("root_page_pnum is not an integer")));
+
+        let next_docid = if let Some(key) = document_tree.get_max_key(page_cache) {
+            u64::from_be_bytes(key.try_into().unwrap()) + 1
+        } else {
+            1u64
+        };
+
         Collection {
             name: metadata["name"].to_string(),
-            next_docid: 1,
-            document_tree: BTree::open(PageNum::from_u64(metadata["root_page_pnum"].as_u64()
-                .expect("root_page_pnum is not an integer"))),
+            next_docid,
+            document_tree,
             indices
         }
     }
@@ -705,7 +714,7 @@ mod tests {
     fn test_create_reopen() {
         let (page_cache, mut allocator, mut collection) = create_collection();
 
-        let docids = {
+        let mut docids = {
             let _transaction = page_cache.begin_transaction();
             collection.create_index(&FieldPath::new("index").unwrap(), &page_cache, &mut allocator);
             vec![
@@ -717,7 +726,7 @@ mod tests {
         let metadata = collection.get_metadata();
         drop(collection);
 
-        let collection = Collection::open(&metadata);
+        let mut collection = Collection::open(&metadata, &page_cache);
 
         assert_eq!(collection.get(docids[0], &page_cache).unwrap(), create_document(1));
         assert_eq!(collection.get(docids[1], &page_cache).unwrap(), create_document(2));
@@ -726,13 +735,20 @@ mod tests {
         assert_eq!(collection.indices.len(), 1);
         assert_eq!(collection.indices[0].field.to_string(), "index");
 
-        let mut index_iter = collection.indices[0].btree.iterate(false, &page_cache);
-        let (key1, value1) = index_iter.next().unwrap();
-        assert_eq!(key1, encode_key(&json!(1), docids[0]).unwrap());
-        assert_eq!(value1, docids[0].0.to_be_bytes());
-        let (key2, value2) = index_iter.next().unwrap();
-        assert_eq!(key2, encode_key(&json!(2), docids[1]).unwrap());
-        assert_eq!(value2, docids[1].0.to_be_bytes());
+        // Insert another record to ensure the docid is unique
+        {
+            let _transaction = page_cache.begin_transaction();
+            let new_docid = collection.insert(&create_document(3), &page_cache, &mut allocator);
+            assert!(!docids.contains(&new_docid));
+            docids.push(new_docid);
+        }
+
+        // Validate everything is intact
+        let index_iter = collection.indices[0].btree.iterate(false, &page_cache);
+        for (i, (key, value)) in index_iter.enumerate() {
+            assert_eq!(key, encode_key(&json!(i + 1), docids[i]).unwrap());
+            assert_eq!(value, docids[i].0.to_be_bytes());
+        }
     }
 
     #[test]

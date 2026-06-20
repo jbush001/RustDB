@@ -196,7 +196,6 @@ impl WriteAheadLog {
     // Write the current header to disk and swap
     fn write_header(&mut self) {
         let header_seq = self.next_header_seq;
-        println!("writing header {}", header_seq & 1);
         self.next_header_seq = self.next_header_seq.wrapping_add(1);
         set_u32(&mut self.header_data, LH_SEQ_OFFS, header_seq);
         let sum = checksum(&self.header_data[4..]);

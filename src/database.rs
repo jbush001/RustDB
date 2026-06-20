@@ -15,12 +15,14 @@
 //
 
 use crate::collection::*;
+use crate::file_store::FileStore;
 use crate::page_allocator::PageAllocator;
 use crate::page_cache::{PageCache, PersistentStore, TransactionGuard, LOG_PAGES, PageNum};
 use crate::superblock::*;
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs;
 use std::rc::Rc;
 
 const PAGE_CACHE_SIZE: usize = 128;
@@ -34,7 +36,20 @@ pub struct Database {
 }
 
 impl Database {
-    pub fn open(file_store: Rc<RefCell<dyn PersistentStore>>) -> Database {
+    pub fn open(file_path: &str) -> Result<Self, String> {
+        let exists = fs::exists(file_path).map_err(|e| e.to_string())?;
+        let file_store: Rc<RefCell<dyn PersistentStore>> =
+            Rc::new(RefCell::new(FileStore::open(file_path).map_err(|e| e.to_string())?));
+        if exists {
+            Self::open_filestore(file_store.clone())
+        } else {
+            Ok(Self::create(file_store.clone()))
+        }
+    }
+
+    fn open_filestore(file_store: Rc<RefCell<dyn PersistentStore>>) -> Result<Self, String> {
+        // TODO validate superblock
+
         let page_cache = PageCache::new(PAGE_CACHE_SIZE, Rc::clone(&file_store));
 
         // Replay before accessing other data structures to ensure they are consistent.
@@ -42,27 +57,26 @@ impl Database {
 
         let page_allocator = PageAllocator::new(&page_cache);
 
-        // A bit of a hack: we know the first page that will be allocated is just
-        // after the journal, so hard code it here.
         let meta_collection = Collection::open(
-            &json!({"indices": [], "root_page_pnum": META_COLLECTION_FPID.as_u64(), "name": "_meta"}));
+            &json!({"indices": [], "root_page_pnum": META_COLLECTION_FPID.as_u64(), "name": "_meta"}),
+            &page_cache);
         let mut collections = HashMap::new();
         let iter = SequentialScan::new(&meta_collection, &page_cache);
         for (docid, document) in iter {
             let name = document["name"].as_str().unwrap().to_string();
-            let collection = Rc::new(RefCell::new(Collection::open(&document)));
+            let collection = Rc::new(RefCell::new(Collection::open(&document, &page_cache)));
             collections.insert(name, (docid, collection));
         }
 
-        Database {
+        Ok(Self {
             meta_collection,
             collections,
             page_cache,
             page_allocator
-        }
+        })
     }
 
-    pub fn create(file_store: Rc<RefCell<dyn PersistentStore>>) -> Database {
+    fn create(file_store: Rc<RefCell<dyn PersistentStore>>) -> Self {
         let page_cache = PageCache::new(PAGE_CACHE_SIZE, Rc::clone(&file_store));
 
         let _transaction = page_cache.begin_transaction();
@@ -71,7 +85,7 @@ impl Database {
 
         let page_allocator = PageAllocator::new(&page_cache);
 
-        Database {
+        Self {
             meta_collection: Collection::create_at("_meta", &page_cache, META_COLLECTION_FPID),
             collections: HashMap::new(),
             page_cache,
@@ -140,13 +154,20 @@ mod tests {
     use crate::mocks::MockPersistentStore;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use tempfile::NamedTempFile;
     use super::*;
 
     #[test]
     fn test_db_create_open() {
-        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(MockPersistentStore::default()));
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_str().unwrap();
+
+        // This will remove the file (so the open funtion will create a new one
+        // below), but will also automatically delete the file after the test runs.
+        std::fs::remove_file(&path).unwrap();
+
         {
-            let mut db = Database::create(mock_io.clone());
+            let mut db = Database::open(&path).expect("failed to open database");
             let _transaction = db.begin_transaction();
             assert!(db.create_collection("people").is_ok());
             db.create_index("people", "name").unwrap();
@@ -156,7 +177,7 @@ mod tests {
         }
 
         // Reopen the database.
-        let db = Database::open(mock_io);
+        let db = Database::open(&path).expect("failed to open database");
         assert_eq!(db.get_collection_list(), vec!["people".to_string()]);
 
         let mut iter = db.query("people").expect("error in query");

@@ -408,6 +408,15 @@ impl BTree {
             }
         }
     }
+
+    pub fn get_max_key(&self, page_cache: &PageCache) -> Option<Vec<u8>> {
+        let mut cursor = self.iterate(true, page_cache);
+        if let Some((key, _)) = cursor.next() {
+            Some(key.to_vec())
+        } else {
+            None
+        }
+    }
 }
 
 // Create an empty node
@@ -1335,5 +1344,25 @@ mod tests {
         assert_eq!(key.as_slice(), b"abcd");
         assert_eq!(val.as_slice(), b"efg");
         validate_btree(&tree, &page_cache);
+    }
+
+    #[test]
+    fn test_get_max_key() {
+        let (page_cache, mut allocator, tree) = create_test_btree();
+        {
+            let _transaction = page_cache.begin_transaction();
+            tree.insert(b"abcd", b"efg", &page_cache, &mut allocator);
+            tree.insert(b"zed", b"efg", &page_cache, &mut allocator);
+            tree.insert(b"cat", b"efg", &page_cache, &mut allocator);
+            tree.insert(b"box", b"efg", &page_cache, &mut allocator);
+        }
+
+        assert_eq!(&tree.get_max_key(&page_cache).unwrap(), b"zed");
+    }
+
+    #[test]
+    fn test_get_max_key_empty() {
+        let (page_cache, mut _allocator, tree) = create_test_btree();
+        assert!(tree.get_max_key(&page_cache).is_none());
     }
 }

@@ -27,14 +27,4 @@ mod slotted_page;
 mod wal;
 #[cfg(test)] mod mocks;
 
-use crate::database::Database;
-use crate::file_store::FileStore;
-use crate::page_cache::PersistentStore;
-use std::cell::RefCell;
-use std::rc::Rc;
-
-fn main() {
-    // TODO need to check if main.db exists, create if if not
-    let file_store: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(FileStore::open("main.db").unwrap()));
-    let _db = Database::create(file_store);
-}
+pub use database::Database;
