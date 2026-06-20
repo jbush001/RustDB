@@ -131,6 +131,8 @@ impl Collection {
         page_cache: &PageCache,
         page_allocator: &mut PageAllocator) {
 
+        assert!(document.is_object(), "Attempt to insert non-object");
+
         let mut content = Vec::with_capacity(1024);
         content.push(0); // flag byte
         serde_json::to_writer(&mut content, &document).expect("serialization failed");
@@ -194,7 +196,7 @@ impl Collection {
         let cursor = self.document_tree.iterate(false, page_cache);
         for (docid_bytes, document_bytes) in cursor {
             let docid = DocId(u64::from_be_bytes(docid_bytes.try_into().unwrap()));
-            let document = get_document_body(&document_bytes, page_cache);
+            let document = materialize_doc(&document_bytes, page_cache);
 
             if let Ok(val) = lookup_field(path, &document) {
                 if let Ok(encoded) = encode_key(&val, docid) {
@@ -221,7 +223,7 @@ impl Collection {
             return None;
         }
 
-        Some(get_document_body(&document_bytes, page_cache))
+        Some(materialize_doc(&document_bytes, page_cache))
     }
 
     pub fn update(&mut self,
@@ -250,7 +252,7 @@ impl Collection {
             return;
         }
 
-        let document = get_document_body(&document_bytes, page_cache);
+        let document = materialize_doc(&document_bytes, page_cache);
 
         // Free overflow pages if present
         if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
@@ -289,7 +291,7 @@ impl Collection {
     }
 }
 
-fn get_document_body(document_bytes: &[u8], page_cache: &PageCache) -> Value {
+fn materialize_doc(document_bytes: &[u8], page_cache: &PageCache) -> Value {
     if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
         // This is using overflow pages
         let mut length = get_u64(document_bytes, 1) as usize;
@@ -410,7 +412,7 @@ impl Iterator for SequentialScan {
     fn next(&mut self) -> Option<Self::Item> {
         if let Some((docid_bytes, value_bytes)) = self.iterator.next() {
             let docid = DocId(u64::from_be_bytes(docid_bytes.try_into().unwrap()));
-            let doc = get_document_body(&value_bytes, &self.page_cache);
+            let doc = materialize_doc(&value_bytes, &self.page_cache);
             Some((docid, doc))
         } else {
             None
@@ -781,6 +783,13 @@ mod tests {
             assert_eq!(create_document(i), value);
             i += 1;
         }
+    }
+
+    #[test]
+    #[should_panic = "Attempt to insert non-object"]
+    fn test_insert_non_object() {
+        let (page_cache, mut allocator, mut collection) = create_collection();
+        collection.insert(&json!([1,2,3,4]), &page_cache, &mut allocator);
     }
 
     #[test]
