@@ -28,12 +28,12 @@ fn main() {
 
     {
         let _transaction = db.begin_transaction();
-        db.insert_document("people", json!({"name": "Alice", "age": 30})).unwrap();
-        db.insert_document("people", json!({"name": "Bob", "age": 25})).unwrap();
-        db.insert_document("people", json!({"name": "Charlie", "age": 35})).unwrap();
+        db.insert_document("people", &json!({"name": "Alice", "age": 30})).unwrap();
+        db.insert_document("people", &json!({"name": "Bob", "age": 25})).unwrap();
+        db.insert_document("people", &json!({"name": "Charlie", "age": 35})).unwrap();
     }
 
-    let iter = db.query("people").expect("error in query");
+    let iter = db.seq_iter("people").expect("error in query");
     for (docid, value) in iter {
         println!("{} {}", docid.0, value);
     }

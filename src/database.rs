@@ -128,7 +128,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn insert_document(&mut self, collection_name: &str, document: Value) -> Result<DocId, String> {
+    pub fn insert_document(&mut self, collection_name: &str, document: &Value) -> Result<DocId, String> {
         let (_collection_id, collection) = self.collections.get(collection_name)
             .ok_or("Collection not found".to_string())?;
 
@@ -142,10 +142,27 @@ impl Database {
         self.collections.keys().cloned().collect()
     }
 
-    pub fn query(&self, collection_name: &str) -> Result<impl Iterator<Item = (DocId, Value)>, String> {
+    pub fn seq_iter(&self, collection_name: &str) -> Result<impl Iterator<Item = (DocId, Value)>, String> {
         let (_collection_id, collection) = self.collections.get(collection_name)
             .ok_or("Collection not found".to_string())?;
         Ok(SequentialScan::new(&collection.borrow(), &self.page_cache))
+    }
+
+    pub fn index_iter(&self, collection_name: &str, index_name: &str,
+        low_key: Option<Value>, high_key: Option<Value>, reverse: bool)
+        -> Result<impl Iterator<Item = (DocId, Value)>, String> {
+        let (_collection_id, collection) = self.collections.get(collection_name)
+            .ok_or("Collection not found".to_string())?;
+        let index = {
+            collection.borrow().find_index(index_name)
+        };
+
+        if let Some(index) = index {
+            Ok(IndexScan::new(collection.clone(), index,
+                low_key, high_key, reverse, &self.page_cache)?)
+        } else {
+            Err("Unknown index".to_string())
+        }
     }
 }
 
@@ -171,16 +188,16 @@ mod tests {
             let _transaction = db.begin_transaction();
             assert!(db.create_collection("people").is_ok());
             db.create_index("people", "name").unwrap();
-            db.insert_document("people", json!({"name": "Alice", "age": 30})).unwrap();
-            db.insert_document("people", json!({"name": "Bob", "age": 25})).unwrap();
-            db.insert_document("people", json!({"name": "Charlie", "age": 35})).unwrap();
+            db.insert_document("people", &json!({"name": "Alice", "age": 30})).unwrap();
+            db.insert_document("people", &json!({"name": "Bob", "age": 25})).unwrap();
+            db.insert_document("people", &json!({"name": "Charlie", "age": 35})).unwrap();
         }
 
         // Reopen the database.
         let db = Database::open(&path).expect("failed to open database");
         assert_eq!(db.get_collection_list(), vec!["people".to_string()]);
 
-        let mut iter = db.query("people").expect("error in query");
+        let mut iter = db.seq_iter("people").expect("error in query");
         assert_eq!(iter.next(), Some((DocId(1), json!({"name": "Alice", "age": 30}))));
         assert_eq!(iter.next(), Some((DocId(2), json!({"name": "Bob", "age": 25}))));
         assert_eq!(iter.next(), Some((DocId(3), json!({"name": "Charlie", "age": 35}))));
@@ -210,7 +227,7 @@ mod tests {
             MockPersistentStore::default()));
         let mut db = Database::create(mock_io.clone());
         let _transaction = db.begin_transaction();
-        assert_eq!(db.insert_document("employees", json!({"name": "Alice", "age": 30})),
+        assert_eq!(db.insert_document("employees", &json!({"name": "Alice", "age": 30})),
             Err("Collection not found".to_string()));
     }
 
@@ -219,6 +236,37 @@ mod tests {
         let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(
             MockPersistentStore::default()));
         let db = Database::create(mock_io.clone());
-        assert!(db.query("employees").is_err());
+        assert!(db.seq_iter("employees").is_err());
+    }
+
+    #[test]
+    fn test_index_iter() {
+        let mock_io: Rc<RefCell<dyn PersistentStore>> = Rc::new(RefCell::new(
+            MockPersistentStore::default()));
+
+        let records = [
+            json!({"name": "Alice", "age": 7}),
+            json!({"name": "Jim", "age": 12}),
+            json!({"name": "Joe", "age": 25}),
+            json!({"name": "Mike", "age": 37}),
+            json!({"name": "Ed", "age": 82})
+        ];
+
+        let mut db = Database::create(mock_io.clone());
+        {
+            let _transaction = db.begin_transaction();
+            db.create_collection("people").expect("failed to create collection");
+            db.create_index("people", "age").unwrap();
+            for rec in &records {
+                db.insert_document("people", rec).unwrap();
+            }
+        }
+
+        let mut iter = db.index_iter("people", "age", Some(json!(10)), Some(json!(40)), false).expect("error in query");
+        for i in 1..4 {
+            assert_eq!(iter.next(), Some((DocId(i + 1), records[i as usize].clone())));
+        }
+
+        assert!(iter.next().is_none());
     }
 }

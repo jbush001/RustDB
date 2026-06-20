@@ -275,6 +275,18 @@ impl Collection {
             }
         }
     }
+
+    pub fn find_index(&self, name: &str) -> Option<usize> {
+        if let Ok(field) = FieldPath::new(name) {
+            for (i, index) in self.indices.iter().enumerate() {
+                if index.field == field {
+                    return Some(i);
+                }
+            }
+        }
+
+        return None
+    }
 }
 
 fn get_document_body(document_bytes: &[u8], page_cache: &PageCache) -> Value {
@@ -416,7 +428,7 @@ pub struct IndexScan {
 }
 
 impl IndexScan {
-    fn new(collection_ref: Rc<RefCell<Collection>>, field_index: usize,
+    pub fn new(collection_ref: Rc<RefCell<Collection>>, field_index: usize,
         start_range: Option<Value>, end_range: Option<Value>, reverse: bool,
         page_cache: &PageCache) -> Result<Self, String> {
         let collection = collection_ref.borrow_mut();
@@ -477,7 +489,7 @@ impl Iterator for IndexScan {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 enum PathElement {
     ArrayIndex(usize),
     FieldName(String)
@@ -495,7 +507,7 @@ impl std::fmt::Display for PathElement {
 }
 
 // A path uniquely identifies some element within a document.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct FieldPath(Vec<PathElement>);
 
 impl std::fmt::Display for FieldPath {
@@ -1297,5 +1309,20 @@ mod tests {
             .expect("failed to open cursor");
         assert_eq!(iter.next(), Some((docid1, doc1)));
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_find_index() {
+        let (mut page_cache, mut allocator, mut collection) = create_collection();
+
+        let _transaction = page_cache.begin_transaction();
+        collection.create_index(&FieldPath::new("foo").unwrap(), &mut page_cache, &mut allocator);
+        collection.create_index(&FieldPath::new("bar.baz").unwrap(), &mut page_cache, &mut allocator);
+        collection.create_index(&FieldPath::new("boo").unwrap(), &mut page_cache, &mut allocator);
+
+        assert_eq!(collection.find_index("foo"), Some(0));
+        assert_eq!(collection.find_index("bar.baz"), Some(1));
+        assert_eq!(collection.find_index("boo"), Some(2));
+        assert_eq!(collection.find_index("frotz"), None);
     }
 }
