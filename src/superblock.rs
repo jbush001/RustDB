@@ -16,7 +16,7 @@
 
 // Block 0, the first block in the filesystem, has key information and
 // links out to other file system structures. As such, many other places
-// in the code access it.
+// in the code access it. The superblock is protected by the write-ahead-log
 
 use crate::page_cache::*;
 use crate::util::*;

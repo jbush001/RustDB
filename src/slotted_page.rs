@@ -33,9 +33,10 @@ use crate::util::*;
 //  |
 // data array
 //
-// The data array is always packed and at the end of the page, the offset
-// table grows towards it (although the data array doesn't necessarily
-// have to be in the same order as the offsets table).
+// There are no gaps between records in the data array, which always grows from
+// the end of the page, the offset table grows towards it (although the data
+// array doesn't necessarily have to be in the same order as the offsets
+// table).
 //
 
 const DATA_START_FIELD_OFFS: usize = 32;

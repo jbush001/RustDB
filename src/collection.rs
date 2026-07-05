@@ -23,9 +23,6 @@
 // A linked list of external pages to store the data. This allows arbitrarily
 // large records.
 
-// TODO: when this detects database corruption, it currently panics. Decide
-// how to handle this.
-
 use crate::btree::*;
 use crate::page_allocator::*;
 use crate::page_cache::*;
@@ -92,6 +89,9 @@ impl Collection {
         }
     }
 
+    // Creates a new collection data structure with the root of the document BTree
+    // at a specified page. Used during database creation to create the _meta
+    // table.
     pub fn create_at(name: &str, page_cache: &PageCache, root_page: PageNum) -> Self {
         Collection {
             name: name.to_string(),
@@ -101,6 +101,7 @@ impl Collection {
         }
     }
 
+    // The returned JSON object describe the on-disk format of this collection.
     pub fn get_metadata(&self) -> Value {
         json!({
             "name": self.name,
@@ -232,7 +233,9 @@ impl Collection {
         page_cache: &PageCache,
         page_allocator: &mut PageAllocator) {
 
-        // TODO optimize this.
+        // TODO optimize this. We could retrieve the existing record and
+        // determine which keys have changed to skip updating indices that
+        // don't need it.
         self.delete(docid, page_cache, page_allocator);
         self.insert_internal(docid, document, page_cache, page_allocator);
     }
@@ -321,15 +324,20 @@ fn materialize_doc(document_bytes: &[u8], page_cache: &PageCache) -> Value {
 // Converts a database field value into a byte array suitable for use as a
 // B-tree key. B-tree keys must conform to two rules:
 //   1. They must be unique.
-//   2. Lexicographic byte order must match logical value order.
+//   2. Lexicographic byte order must match expected logical value order.
 //
-// To satisfy (1), we append the document ID as a tiebreaker. For (2), we
-// convert non-lexicographic types: floats as sign-magnitude ordered binary,
-// integers as unsigned offset binary. Strings are already in lexicographic
-// order, but since they are variable-length, the document ID must be
-// separated with a zero byte to preserve the sort order.
+// However, collection indices don't obey these rules, allowing duplicate keys
+// and supporting encodings like floating point which are not lexicographically
+// ordered. To bridge this gap, we create an alternate encoding to use as keys
+// in the indices. This appends the document ID to enforce uniqueness and
+// converts non-lexicographic types to alternate forms: floats as
+// sign-magnitude binary, integers as unsigned offset binary. Strings are already
+// in lexicographic order, but since they are variable-length, the document ID
+// must be separated with a zero byte to preserve the sort order.
 //
-// Note: this encoding is one-way and not intended to be decoded.
+// Note: this encoding is one-way and not intended to be decoded. We do the
+// same one-way transform on keys when we are searching and the unaltered
+// version is stored in the record body)
 //
 pub fn encode_key(key: &Value, docid: DocId) -> Result<Vec<u8>, String> {
     // Prepend a tag in the event key types are mixed in an index.

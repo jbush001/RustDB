@@ -14,10 +14,11 @@
 //   limitations under the License.
 //
 
-// This is a simplistic implementation that is a bit of a placeholder. There
-// are two places to get pages: virgin pages can be carved off the end of the
-// file (the frontier) or any previously freed pages are stored in a on-disk
-// linked list structure.
+// There are two places to get pages: virgin pages can be added to the end
+// of the file, growing the overall size or this will return previously freed
+// pages which are stored in a on-disk linked list structure.
+// TODO: this never shrinks the overall file, even if all the pages on the end
+// have been freed.
 
 use crate::page_cache::*;
 use crate::superblock::*;

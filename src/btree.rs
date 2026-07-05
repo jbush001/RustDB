@@ -14,14 +14,14 @@
 //   limitations under the License.
 //
 
-// The BTree is an efficient key-value store that supports O(log n) lookup
-// and ordered iteration. It is the base storage mechanism for all structured
-// data. This implementation is variant called a B+ tree, distinguished by the
-// fact that values are only stored in the leaf nodes. Keys must be unique in
-// the BTree.
+// The BTree is an efficient key-value store that supports O(log n) lookup,
+// insertion, and delete, as well as O(1) ordered iteration. This
+// implementation is variant called a B+ tree, distinguished by the fact that
+// values are only stored in the leaf nodes. Keys must be unique in the BTree.
 //
 // The BTree is structured so that the root node file ID never changes even if
-// it is split. The upper layers depend on this.
+// it is split. The upper layers depend on this as it is referenced by other
+// on-disk structured.
 //
 // Each entry is:
 // key_length: u16
@@ -234,8 +234,7 @@ impl BTree {
             // Need to split...
             if *node_pnum == self.root {
                 // Split the root node. This is the only place where the tree grows.
-                // The same page number will continue to be the root, since it is
-                // referenced in other places.
+                // It ensures the same page number will continue to be the root.
                 let new_page_pnum1 = page_allocator.alloc();
                 let new_page_pnum2 = page_allocator.alloc();
 
@@ -262,7 +261,8 @@ impl BTree {
 
                 // Reinitialize the root. We've created two new pages and copied half
                 // of the roots entries into each of them. Now one of them will be the
-                // "right_child" member, the other gets an entry with a key.
+                // "right_child" member, the other gets an entry with a key. We preserve
+                // the root page number.
                 init_btree_node(&mut page);
                 set_not_leaf(&mut page); // If the root was a leaf, it is not now.
                 append_entry(&mut page, &split_key, &new_page_pnum1.to_bytes());
@@ -491,8 +491,8 @@ fn get_entry_value(page: &PageData, rec_num: usize) -> &[u8] {
 // Return an index into the array:
 // - If there is an exact match, return the index of the matching entry.
 // - If there is not an exact match, return the index of the smallest
-//   key that is larger than the search key (i.e. where this would be
-//   inserted).
+//   key that is larger than the search key (i.e. the index it would have
+//   if it were inserted).
 // - If the search key is lower than the lowest key, return 0
 // - If it is higher than the highest key, return the number of entries
 //   in the table.

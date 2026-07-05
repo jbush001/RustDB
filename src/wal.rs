@@ -21,7 +21,7 @@ use std::rc::Rc;
 
 //
 // The write ahead log ensures database consistency in the event of a crash
-// by implementing a two-phase commit protcol
+// by implementing a two-phase commit protocol
 // <https://en.wikipedia.org/wiki/Two-phase_commit_protocol>.
 //
 // The on-disk data structure starts with two copies of the log header.
@@ -298,7 +298,7 @@ mod tests {
         let mut log2 = WriteAheadLog::new(PageNum::from_u64(2), 10, &mock_io);
         log2.replay();
 
-        // Okay, we never actually wrote these blocks, so the replay will
+        // We never actually wrote these blocks, so the replay will
         // do nothing and the blocks will be zero.
         let mut store = mock_io.borrow_mut();
         let mut block: PageData = [0; PAGE_SIZE];
