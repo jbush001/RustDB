@@ -33,6 +33,8 @@ use crate::page_allocator::PageAllocator;
 use crate::page_cache::*;
 use crate::slotted_page::*;
 use crate::util::*;
+use std::collections::VecDeque;
+use std::fmt;
 
 const HEADER_NEXT_SIB_OFFS: usize = 8;
 const HEADER_PREV_SIB_OFFS: usize = 16;
@@ -377,37 +379,6 @@ impl BTree {
         }
     }
 
-    fn print(&self) {
-        let mut fifo: Vec<PageNum> = Vec::new();
-        fifo.push(self.root);
-        while !fifo.is_empty() {
-            let page_num = fifo.remove(0);
-            let page = self.page_cache.lock_page(page_num);
-            println!("Node page_num {:?} is_leaf {} prev_sib {:?} next_sib {:?} right_child {:?}",
-                page_num, is_leaf(&page), get_prev_sib(&page), get_next_sib(&page), get_right_child(&page));
-
-            if is_leaf(&page) {
-                for i in 0..get_num_sp_entries(&page) {
-                    println!("{}. {} value {}", i,
-                        to_hex_string(get_entry_key(&page, i), 16),
-                        to_hex_string(get_entry_value(&page, i), 16));
-                }
-            } else {
-                for i in 0..get_num_sp_entries(&page) {
-                    let child_pnum = PageNum::from_bytes(get_entry_value(&page, i))
-                        .expect("Invalid entry");
-                    println!("{}. {} child page {:?}", i,
-                        to_hex_string(get_entry_key(&page, i), 16), child_pnum);
-                    fifo.push(child_pnum);
-                }
-
-                if let Some(child) = get_right_child(&page) {
-                    fifo.push(child);
-                }
-            }
-        }
-    }
-
     pub fn get_max_key(&self) -> Option<Vec<u8>> {
         let mut cursor = self.iterate(true);
         if let Some((key, _)) = cursor.next() {
@@ -415,6 +386,41 @@ impl BTree {
         } else {
             None
         }
+    }
+}
+
+impl fmt::Debug for BTree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut fifo: VecDeque<PageNum> = VecDeque::new();
+        fifo.push_back(self.root);
+        while let Some(page_num) = fifo.pop_front() {
+            let page = self.page_cache.lock_page(page_num);
+            write!(f, "Node page_num {:?} is_leaf {} prev_sib {:?} next_sib {:?} right_child {:?}\n",
+                page_num, is_leaf(&page), get_prev_sib(&page), 
+                get_next_sib(&page), get_right_child(&page))?;
+
+            if is_leaf(&page) {
+                for i in 0..get_num_sp_entries(&page) {
+                    write!(f, "  {}. {} value {}\n", i,
+                        to_hex_string(get_entry_key(&page, i), 16),
+                        to_hex_string(get_entry_value(&page, i), 16))?;
+                }
+            } else {
+                for i in 0..get_num_sp_entries(&page) {
+                    let child_pnum = PageNum::from_bytes(get_entry_value(&page, i))
+                        .expect("Invalid entry");
+                    write!(f, "    {}. {} child page {:?}\n", i,
+                        to_hex_string(get_entry_key(&page, i), 16), child_pnum)?;
+                    fifo.push_back(child_pnum);
+                }
+
+                if let Some(child) = get_right_child(&page) {
+                    fifo.push_back(child);
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -1235,9 +1241,9 @@ mod tests {
 
     // Just ensures it doesn't crash...
     #[test]
-    fn test_print_btree() {
+    fn test_btree_debug() {
         let (_page_cache, _alloc, tree) = populate_test_btree(256);
-        tree.print();
+        let _value = format!("{:?}", tree);
     }
 
     // The Oracle is a parallel data structure that tracks the expected
