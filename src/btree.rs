@@ -84,7 +84,8 @@ impl Iterator for BTreeCursor {
 }
 
 pub struct BTree {
-    root: PageNum
+    root: PageNum,
+    page_cache: PageCache
 }
 
 impl BTree {
@@ -98,22 +99,22 @@ impl BTree {
         let mut page = page_cache.lock_page_mut(root);
         init_btree_node(&mut page);
 
-        BTree { root }
+        BTree { root, page_cache: page_cache.clone() }
     }
 
     // Create a btree wrapper for an existing btree
-    pub fn open(root: PageNum) -> Self {
-        BTree { root }
+    pub fn open(root: PageNum, page_cache: &PageCache) -> Self {
+        BTree { root, page_cache: page_cache.clone() }
     }
 
     pub fn get_root_page_id(&self) -> PageNum {
         self.root
     }
 
-    pub fn iterate(&self, reverse: bool, page_cache: &PageCache) -> BTreeCursor {
+    pub fn iterate(&self, reverse: bool) -> BTreeCursor {
         let mut current_node_pnum = self.root;
         loop {
-            let page = page_cache.lock_page(current_node_pnum);
+            let page = self.page_cache.lock_page(current_node_pnum);
             if is_leaf(&page) {
                 let num_entries = get_num_sp_entries(&page);
                 if num_entries == 0 {
@@ -125,7 +126,7 @@ impl BTree {
                         current_node_pnum: None,
                         current_index: 0,
                         reverse: false,
-                        page_cache: page_cache.clone()
+                        page_cache: self.page_cache.clone()
                     };
                 }
 
@@ -133,7 +134,7 @@ impl BTree {
                     current_node_pnum: Some(current_node_pnum),
                     current_index: if reverse && num_entries > 0 { num_entries - 1 } else { 0 },
                     reverse,
-                    page_cache: page_cache.clone()
+                    page_cache: self.page_cache.clone()
                 }
             }
 
@@ -150,10 +151,10 @@ impl BTree {
         }
     }
 
-    pub fn find(&self, key: &[u8], reverse: bool, page_cache: &PageCache) -> BTreeCursor {
+    pub fn find(&self, key: &[u8], reverse: bool) -> BTreeCursor {
         let mut current_node_pnum = self.root;
         loop {
-            let page = page_cache.lock_page(current_node_pnum);
+            let page = self.page_cache.lock_page(current_node_pnum);
             let index = find_key(&page, key);
             if is_leaf(&page) {
                 if (reverse && index == 0) || (!reverse && index == get_num_sp_entries(&page)) {
@@ -162,7 +163,7 @@ impl BTree {
                         current_node_pnum: None,
                         current_index: 0,
                         reverse,
-                        page_cache: page_cache.clone()
+                        page_cache: self.page_cache.clone()
                     }
                 }
 
@@ -170,7 +171,7 @@ impl BTree {
                     current_node_pnum: Some(current_node_pnum),
                     current_index: if reverse { index - 1 } else { index },
                     reverse,
-                    page_cache: page_cache.clone()
+                    page_cache: self.page_cache.clone()
                 }
             }
 
@@ -184,13 +185,12 @@ impl BTree {
     }
 
     fn find_with_path(&self,
-        key: &[u8],
-        page_cache: &PageCache) -> (Vec<(PageNum, usize)>, bool) {
+        key: &[u8]) -> (Vec<(PageNum, usize)>, bool) {
         let mut current_node_pnum = self.root;
         let mut path: Vec<(PageNum, usize)> = Vec::new();
 
         let found = loop {
-            let page = page_cache.lock_page(current_node_pnum);
+            let page = self.page_cache.lock_page(current_node_pnum);
             let index = find_key(&page, key);
             path.push((current_node_pnum, index));
             if is_leaf(&page) {
@@ -212,12 +212,11 @@ impl BTree {
     pub fn insert(&self,
         key: &[u8],
         value: &[u8],
-        page_cache: &PageCache,
         page_allocator: &mut PageAllocator)
     {
         assert!(key.len() + value.len() < MAX_RECORD_SIZE);
 
-        let (path, found) = self.find_with_path(key, page_cache);
+        let (path, found) = self.find_with_path(key);
         assert!(!found);
 
         // We're now at a leaf. Insert and walk back up the tree splitting nodes
@@ -225,7 +224,7 @@ impl BTree {
         let mut insert_value = value.to_vec();
         let mut insert_key = key.to_vec();
         for (node_pnum, _) in path.iter().rev() {
-            let mut page = page_cache.lock_page_mut(*node_pnum);
+            let mut page = self.page_cache.lock_page_mut(*node_pnum);
             if get_sp_free_space(&page) >= get_entry_size(&insert_key, &insert_value) {
                 insert_entry(&mut page, insert_key.as_slice(), insert_value.as_slice());
                 break;
@@ -238,8 +237,8 @@ impl BTree {
                 let new_page_pnum1 = page_allocator.alloc();
                 let new_page_pnum2 = page_allocator.alloc();
 
-                let mut new_page1 = page_cache.lock_page_mut(new_page_pnum1);
-                let mut new_page2 = page_cache.lock_page_mut(new_page_pnum2);
+                let mut new_page1 = self.page_cache.lock_page_mut(new_page_pnum1);
+                let mut new_page2 = self.page_cache.lock_page_mut(new_page_pnum2);
                 let split_key = split_node(&page, &mut new_page1, &mut new_page2);
 
                 // The root node can be a leaf if the number of entries is small. If so,
@@ -272,7 +271,7 @@ impl BTree {
                 // Split leaf or interior page.
                 let new_page_pnum = page_allocator.alloc();
                 let mut temp: PageData = [0; PAGE_SIZE];
-                let mut new_page = page_cache.lock_page_mut(new_page_pnum);
+                let mut new_page = self.page_cache.lock_page_mut(new_page_pnum);
                 let new_parent_key = split_node(&page, &mut new_page, &mut temp);
 
                 // We will allocate a new page to be *before* this page. Temp is a holding
@@ -286,7 +285,7 @@ impl BTree {
 
                     // Need to fix forward link
                     if let Some(prev) = get_prev_sib(&page) {
-                        let mut prev_sib_page = page_cache.lock_page_mut(prev);
+                        let mut prev_sib_page = self.page_cache.lock_page_mut(prev);
                         set_next_sib(&mut prev_sib_page, Some(new_page_pnum));
                     }
                 } else {
@@ -311,15 +310,15 @@ impl BTree {
 
     // Here be dragons. delete is one of the most complex functions, with tons of edge
     // cases.
-    pub fn delete(&self, key: &[u8], page_cache: &PageCache, allocator: &mut PageAllocator) {
-        let (path, found) = self.find_with_path(key, page_cache);
+    pub fn delete(&self, key: &[u8], allocator: &mut PageAllocator) {
+        let (path, found) = self.find_with_path(key);
         if !found {
             println!("btree_delete: warning, key not found");
             return;
         }
 
         for (page_num, index) in path.iter().rev() {
-            let mut page = page_cache.lock_page_mut(*page_num);
+            let mut page = self.page_cache.lock_page_mut(*page_num);
             let num_entries = get_num_sp_entries(&page);
             if !is_leaf(&page) && *index == num_entries {
                 // Need to remove right child. Remove it and set the next highest
@@ -364,12 +363,12 @@ impl BTree {
             if is_leaf(&page) {
                 // Remove from the linked list
                 if let Some(prev) = get_prev_sib(&page) {
-                    let mut prev_page = page_cache.lock_page_mut(prev);
+                    let mut prev_page = self.page_cache.lock_page_mut(prev);
                     set_next_sib(&mut prev_page, get_next_sib(&page));
                 }
 
                 if let Some(next) = get_next_sib(&page) {
-                    let mut next_page = page_cache.lock_page_mut(next);
+                    let mut next_page = self.page_cache.lock_page_mut(next);
                     set_prev_sib(&mut next_page, get_prev_sib(&page));
                 }
             }
@@ -378,12 +377,12 @@ impl BTree {
         }
     }
 
-    fn print(&self, page_cache: &PageCache) {
+    fn print(&self) {
         let mut fifo: Vec<PageNum> = Vec::new();
         fifo.push(self.root);
         while !fifo.is_empty() {
             let page_num = fifo.remove(0);
-            let page = page_cache.lock_page(page_num);
+            let page = self.page_cache.lock_page(page_num);
             println!("Node page_num {:?} is_leaf {} prev_sib {:?} next_sib {:?} right_child {:?}",
                 page_num, is_leaf(&page), get_prev_sib(&page), get_next_sib(&page), get_right_child(&page));
 
@@ -409,8 +408,8 @@ impl BTree {
         }
     }
 
-    pub fn get_max_key(&self, page_cache: &PageCache) -> Option<Vec<u8>> {
-        let mut cursor = self.iterate(true, page_cache);
+    pub fn get_max_key(&self) -> Option<Vec<u8>> {
+        let mut cursor = self.iterate(true);
         if let Some((key, _)) = cursor.next() {
             Some(key.to_vec())
         } else {
@@ -637,7 +636,7 @@ mod tests {
         test_sequence.shuffle(&mut SmallRng::seed_from_u64(0xc0fc47a65d406179));
         for i in test_sequence {
             let _transaction = page_cache.begin_transaction();
-            tree.insert(&gen_key_for_index(i), &(i as u64).to_le_bytes(), &page_cache, &mut allocator);
+            tree.insert(&gen_key_for_index(i), &(i as u64).to_le_bytes(), &mut allocator);
         }
 
         (page_cache, allocator, tree)
@@ -1081,9 +1080,9 @@ mod tests {
 
     #[test]
     fn test_valid_btree_create() {
-        let (page_cache, _alloc, tree) = populate_test_btree(256);
+        let (_page_cache, _alloc, tree) = populate_test_btree(256);
         let mut i = 0;
-        for (key, val) in tree.iterate(false, &page_cache) {
+        for (key, val) in tree.iterate(false) {
             assert_eq!(key.as_slice(), gen_key_for_index(i));
             assert_eq!(PageNum::from_bytes(&val).unwrap(), PageNum::from_u64(i as u64));
             i += 1;
@@ -1093,9 +1092,9 @@ mod tests {
     #[test]
     fn test_btree_backward_scan() {
         const NUM_TEST_ENTRIES: usize = 256;
-        let (page_cache, _alloc, tree) = populate_test_btree(NUM_TEST_ENTRIES);
+        let (_page_cache, _alloc, tree) = populate_test_btree(NUM_TEST_ENTRIES);
 
-        let mut cursor = tree.iterate(true, &page_cache);
+        let mut cursor = tree.iterate(true);
         for i in (0..NUM_TEST_ENTRIES).rev() {
             let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
@@ -1107,10 +1106,10 @@ mod tests {
 
     #[test]
     fn test_btree_find() {
-        let (page_cache, _alloc, tree) = populate_test_btree(256);
+        let (_page_cache, _alloc, tree) = populate_test_btree(256);
 
         const START_KEY_IDX: usize = 55;
-        let mut cursor = tree.find(&gen_key_for_index(START_KEY_IDX), false, &page_cache);
+        let mut cursor = tree.find(&gen_key_for_index(START_KEY_IDX), false);
         for i in START_KEY_IDX..START_KEY_IDX + 10 {
             let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), &gen_key_for_index(i));
@@ -1121,9 +1120,9 @@ mod tests {
     // Get the first page in the tree, which requires traversing the left child page.
     #[test]
     fn test_btree_find_begin() {
-        let (page_cache, _alloc, tree) = populate_test_btree(256);
+        let (_page_cache, _alloc, tree) = populate_test_btree(256);
 
-        let mut cursor = tree.find(&[0u8], false, &page_cache);
+        let mut cursor = tree.find(&[0u8], false);
         let Some((key, val)) = cursor.next() else { panic!("cursor failed"); };
         assert_eq!(key.as_slice(), &gen_key_for_index(0));
             assert_eq!(PageNum::from_bytes(&val).unwrap(),  PageNum::from_u64(0));
@@ -1132,18 +1131,18 @@ mod tests {
     // Key is before first key and going in reverse. Nothing to fetch.
     #[test]
     fn test_btree_reverse_find_begin() {
-        let (page_cache, _alloc, tree) = populate_test_btree(256);
+        let (_page_cache, _alloc, tree) = populate_test_btree(256);
 
-        let mut cursor = tree.find(&[0u8], true, &page_cache);
+        let mut cursor = tree.find(&[0u8], true);
         assert_eq!(cursor.next(), None);
     }
 
     // Key is after last key and going forward. Nothing to fetch.
     #[test]
     fn test_btree_find_past_end() {
-        let (page_cache, _alloc, tree) = populate_test_btree(256);
+        let (_page_cache, _alloc, tree) = populate_test_btree(256);
 
-        let mut cursor = tree.find(&[0xff; 255], false, &page_cache);
+        let mut cursor = tree.find(&[0xff; 255], false);
         assert_eq!(cursor.next(), None);
     }
 
@@ -1156,10 +1155,10 @@ mod tests {
         {
             let _transaction = page_cache.begin_transaction();
             tree.delete(gen_key_for_index(INDEX_TO_DELETE).as_slice(),
-                &page_cache, &mut allocator);
+                &mut allocator);
         }
 
-        let mut cursor = tree.iterate(false, &page_cache);
+        let mut cursor = tree.iterate(false);
         for i in 0..NUM_TEST_ENTRIES {
             if i == INDEX_TO_DELETE {
                 continue;
@@ -1183,10 +1182,10 @@ mod tests {
             let _transaction = page_cache.begin_transaction();
 
             // Key is bogus
-            tree.delete(b"yolo", &page_cache, &mut allocator);
+            tree.delete(b"yolo", &mut allocator);
         }
 
-        let mut cursor = tree.iterate(false, &page_cache);
+        let mut cursor = tree.iterate(false);
         for i in 0..NUM_TEST_ENTRIES {
             let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
             assert_eq!(key.as_slice(), gen_key_for_index(i));
@@ -1207,13 +1206,13 @@ mod tests {
 
             for i in delete_seq {
                 let _transaction = page_cache.begin_transaction();
-                tree.delete(&gen_key_for_index(i), &page_cache, &mut allocator);
+                tree.delete(&gen_key_for_index(i), &mut allocator);
             }
         }
 
         validate_btree(&tree, &page_cache);
 
-        let mut cursor = tree.iterate(false, &page_cache);
+        let mut cursor = tree.iterate(false);
         assert_eq!(cursor.next(), None);
 
         // Ensure we've reclaimed storage
@@ -1222,23 +1221,23 @@ mod tests {
 
     #[test]
     fn test_iterate_empty() {
-        let (page_cache, mut _allocator, tree) = create_test_btree();
-        let mut cursor = tree.iterate(false, &page_cache);
+        let (_page_cache, mut _allocator, tree) = create_test_btree();
+        let mut cursor = tree.iterate(false);
         assert_eq!(cursor.next(), None);
     }
 
     #[test]
     fn test_reverse_iterate_empty() {
-        let (page_cache, mut _allocator, tree) = create_test_btree();
-        let mut cursor = tree.iterate(true, &page_cache);
+        let (_page_cache, mut _allocator, tree) = create_test_btree();
+        let mut cursor = tree.iterate(true);
         assert_eq!(cursor.next(), None);
     }
 
     // Just ensures it doesn't crash...
     #[test]
     fn test_print_btree() {
-        let (page_cache, _alloc, tree) = populate_test_btree(256);
-        tree.print(&page_cache);
+        let (_page_cache, _alloc, tree) = populate_test_btree(256);
+        tree.print();
     }
 
     // The Oracle is a parallel data structure that tracks the expected
@@ -1288,7 +1287,7 @@ mod tests {
                     let i = rng.random_range(0..oracle.entries.len());
                     let entry = &oracle.entries[i];
                     let _transaction = page_cache.begin_transaction();
-                    tree.delete(&entry.0, &page_cache, &mut allocator);
+                    tree.delete(&entry.0, &mut allocator);
                     oracle.entries.remove(i);
                 }
             } else {
@@ -1299,11 +1298,11 @@ mod tests {
                 // TODO ensure the key is unique by looking in the oracle.
                 oracle.add(&key, &value);
                 let _transaction = page_cache.begin_transaction();
-                tree.insert(&key, &value, &page_cache, &mut allocator);
+                tree.insert(&key, &value, &mut allocator);
             }
 
             if oracle.entries.len() > 0 {
-                oracle.validate(tree.iterate(false, &page_cache));
+                oracle.validate(tree.iterate(false));
             }
 
             // This is a bit expensive, so do it periodically
@@ -1312,13 +1311,13 @@ mod tests {
             }
         }
 
-        oracle.validate(tree.iterate(false, &page_cache));
+        oracle.validate(tree.iterate(false));
         validate_btree(&tree, &page_cache);
 
         // Delete all remaining entries, ensure nothing was leaked.
         for (key, _) in oracle.entries {
             let _transaction = page_cache.begin_transaction();
-            tree.delete(&key, &page_cache, &mut allocator);
+            tree.delete(&key, &mut allocator);
         }
 
         assert!(allocator.total_allocs - allocator.total_frees < 2);
@@ -1333,13 +1332,13 @@ mod tests {
         // closing and reopening the database.
         {
             let _transaction = page_cache.begin_transaction();
-            tree.insert(b"abcd", b"efg", &page_cache, &mut allocator);
+            tree.insert(b"abcd", b"efg", &mut allocator);
         }
 
         drop(tree);
 
-        let tree = BTree::open(root_pnum);
-        let mut cursor = tree.iterate(false, &page_cache);
+        let tree = BTree::open(root_pnum, &page_cache);
+        let mut cursor = tree.iterate(false);
         let Some((key, val)) = cursor.next() else { panic!("failed to fetch entry"); };
         assert_eq!(key.as_slice(), b"abcd");
         assert_eq!(val.as_slice(), b"efg");
@@ -1351,18 +1350,18 @@ mod tests {
         let (page_cache, mut allocator, tree) = create_test_btree();
         {
             let _transaction = page_cache.begin_transaction();
-            tree.insert(b"abcd", b"efg", &page_cache, &mut allocator);
-            tree.insert(b"zed", b"efg", &page_cache, &mut allocator);
-            tree.insert(b"cat", b"efg", &page_cache, &mut allocator);
-            tree.insert(b"box", b"efg", &page_cache, &mut allocator);
+            tree.insert(b"abcd", b"efg", &mut allocator);
+            tree.insert(b"zed", b"efg", &mut allocator);
+            tree.insert(b"cat", b"efg", &mut allocator);
+            tree.insert(b"box", b"efg", &mut allocator);
         }
 
-        assert_eq!(&tree.get_max_key(&page_cache).unwrap(), b"zed");
+        assert_eq!(&tree.get_max_key().unwrap(), b"zed");
     }
 
     #[test]
     fn test_get_max_key_empty() {
-        let (page_cache, mut _allocator, tree) = create_test_btree();
-        assert!(tree.get_max_key(&page_cache).is_none());
+        let (_page_cache, mut _allocator, tree) = create_test_btree();
+        assert!(tree.get_max_key().is_none());
     }
 }

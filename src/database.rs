@@ -104,8 +104,7 @@ impl Database {
 
         let new_collection = Collection::create(name, &self.page_cache, &mut self.page_allocator);
         let metadata = &new_collection.get_metadata();
-        let id = self.meta_collection.insert(metadata, &self.page_cache,
-            &mut self.page_allocator);
+        let id = self.meta_collection.insert(metadata, &mut self.page_allocator);
         self.collections.insert(name.to_string(),
             (id, Rc::new(RefCell::new(new_collection))));
 
@@ -117,13 +116,13 @@ impl Database {
             .ok_or("Collection not found".to_string())?;
 
         let mut collection = collection.borrow_mut();
-        collection.create_index(&FieldPath::new(field_name)?, &self.page_cache,
+        collection.create_index(&FieldPath::new(field_name)?,
             &mut self.page_allocator);
 
         // Update metadata.
         let metadata = collection.get_metadata();
         self.meta_collection.update(*collection_id, &metadata,
-            &self.page_cache, &mut self.page_allocator);
+            &mut self.page_allocator);
 
         Ok(())
     }
@@ -133,7 +132,7 @@ impl Database {
             .ok_or("Collection not found".to_string())?;
 
         let mut collection = collection.borrow_mut();
-        let docid = collection.insert(&document, &self.page_cache, &mut self.page_allocator);
+        let docid = collection.insert(&document, &mut self.page_allocator);
 
         Ok(docid)
     }

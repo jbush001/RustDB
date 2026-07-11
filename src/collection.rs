@@ -47,7 +47,8 @@ pub struct Collection {
     name: String,
     next_docid: u64,
     document_tree: BTree,
-    indices: Vec<Index>
+    indices: Vec<Index>,
+    page_cache: PageCache
 }
 
 impl Collection {
@@ -58,15 +59,17 @@ impl Collection {
                 field: FieldPath::new(index["path"].as_str()
                     .expect("path is not a string")).expect("invalid field path"),
                 btree: BTree::open(PageNum::from_u64(index["root_pnum"].as_u64()
-                    .expect("root_pnum is not an integer")))
+                    .expect("root_pnum is not an integer")), &page_cache)
             });
         }
 
         let document_tree = BTree::open(PageNum::from_u64(
             metadata["root_page_pnum"].as_u64()
-            .expect("root_page_pnum is not an integer")));
+            .expect("root_page_pnum is not an integer")),
+            page_cache
+        );
 
-        let next_docid = if let Some(key) = document_tree.get_max_key(page_cache) {
+        let next_docid = if let Some(key) = document_tree.get_max_key() {
             u64::from_be_bytes(key.try_into().unwrap()) + 1
         } else {
             1u64
@@ -76,7 +79,8 @@ impl Collection {
             name: metadata["name"].to_string(),
             next_docid,
             document_tree,
-            indices
+            indices,
+            page_cache: page_cache.clone()
         }
     }
 
@@ -85,7 +89,8 @@ impl Collection {
             name: name.to_string(),
             next_docid: 1,
             document_tree: BTree::create(page_cache, page_allocator),
-            indices: Vec::new()
+            indices: Vec::new(),
+            page_cache: page_cache.clone()
         }
     }
 
@@ -97,7 +102,8 @@ impl Collection {
             name: name.to_string(),
             next_docid: 1,
             document_tree: BTree::create_at(page_cache, root_page),
-            indices: Vec::new()
+            indices: Vec::new(),
+            page_cache: page_cache.clone()
         }
     }
 
@@ -117,19 +123,17 @@ impl Collection {
 
     pub fn insert(&mut self,
         document: &Value,
-        page_cache: &PageCache,
         page_allocator: &mut PageAllocator) -> DocId {
 
         let docid = self.next_docid;
         self.next_docid += 1;
-        self.insert_internal(DocId(docid), document, page_cache, page_allocator);
+        self.insert_internal(DocId(docid), document, page_allocator);
         DocId(docid)
     }
 
     fn insert_internal(&mut self,
         docid: DocId,
         document: &Value,
-        page_cache: &PageCache,
         page_allocator: &mut PageAllocator) {
 
         assert!(document.is_object(), "Attempt to insert non-object");
@@ -149,7 +153,7 @@ impl Collection {
             let mut page_num = Some(page_allocator.alloc());
             *pointer.u64_field_mut(9) = page_num.to_bytes();
             while offset < content.len() {
-                let mut page = page_cache.lock_page_mut(page_num.expect("null page num"));
+                let mut page = self.page_cache.lock_page_mut(page_num.expect("null page num"));
                 let to_copy = std::cmp::min(content.len() - offset, PAGE_SIZE - 8);
                 page[8..8 + to_copy].copy_from_slice(&content[offset..offset + to_copy]);
                 page_num = if offset + to_copy < content.len() {
@@ -162,9 +166,9 @@ impl Collection {
                 offset += to_copy;
             }
 
-            self.document_tree.insert(&docid.0.to_be_bytes(), &pointer, page_cache, page_allocator);
+            self.document_tree.insert(&docid.0.to_be_bytes(), &pointer, page_allocator);
         } else {
-            self.document_tree.insert(&docid.0.to_be_bytes(), &content, page_cache, page_allocator);
+            self.document_tree.insert(&docid.0.to_be_bytes(), &content, page_allocator);
         }
 
         // Update indices
@@ -174,37 +178,35 @@ impl Collection {
                     index.btree.insert(
                         &encoded,
                         &docid.0.to_be_bytes(),
-                        page_cache,
                         page_allocator);
                 }
             }
         }
     }
 
-    pub fn create_index(&mut self, path: &FieldPath, page_cache: &PageCache,
+    pub fn create_index(&mut self, path: &FieldPath,
         page_allocator: &mut PageAllocator) {
 
         // TODO fail if index already exists
 
         let index = Index {
             field: path.clone(),
-            btree: BTree::create(page_cache, page_allocator)
+            btree: BTree::create(&self.page_cache, page_allocator)
         };
 
         self.indices.push(index);
 
         // Scan existing documents and add to index
-        let cursor = self.document_tree.iterate(false, page_cache);
+        let cursor = self.document_tree.iterate(false);
         for (docid_bytes, document_bytes) in cursor {
             let docid = DocId(u64::from_be_bytes(docid_bytes.try_into().unwrap()));
-            let document = materialize_doc(&document_bytes, page_cache);
+            let document = materialize_doc(&document_bytes, &self.page_cache);
 
             if let Ok(val) = lookup_field(path, &document) {
                 if let Ok(encoded) = encode_key(&val, docid) {
                     self.indices.last().unwrap().btree.insert(
                         &encoded,
                         &docid.0.to_be_bytes(),
-                        page_cache,
                         page_allocator);
                 } else {
                     println!("Error encoding key");
@@ -213,9 +215,9 @@ impl Collection {
         }
     }
 
-    pub fn get(&self, docid: DocId, page_cache: &PageCache) -> Option<Value> {
+    pub fn get(&self, docid: DocId) -> Option<Value> {
         let docid_key = &docid.0.to_be_bytes();
-        let mut cursor = self.document_tree.find(docid_key, false, page_cache);
+        let mut cursor = self.document_tree.find(docid_key, false);
         let entry = cursor.next();
         entry.as_ref()?; // Return if entry is None
 
@@ -224,27 +226,26 @@ impl Collection {
             return None;
         }
 
-        Some(materialize_doc(&document_bytes, page_cache))
+        Some(materialize_doc(&document_bytes, &self.page_cache))
     }
 
     pub fn update(&mut self,
         docid: DocId,
         document: &Value,
-        page_cache: &PageCache,
         page_allocator: &mut PageAllocator) {
 
         // TODO optimize this. We could retrieve the existing record and
         // determine which keys have changed to skip updating indices that
         // don't need it.
-        self.delete(docid, page_cache, page_allocator);
-        self.insert_internal(docid, document, page_cache, page_allocator);
+        self.delete(docid, page_allocator);
+        self.insert_internal(docid, document, page_allocator);
     }
 
     // TODO decide how to handle missing document. Should it be an error, or is it
     // fine to ignore it?
-    fn delete(&mut self, docid: DocId, page_cache: &PageCache, page_allocator: &mut PageAllocator) {
+    fn delete(&mut self, docid: DocId, page_allocator: &mut PageAllocator) {
         let docid_key = &docid.0.to_be_bytes();
-        let mut cursor = self.document_tree.find(docid_key, false, page_cache);
+        let mut cursor = self.document_tree.find(docid_key, false);
         let entry = cursor.next();
         if entry.is_none() {
             return;
@@ -255,13 +256,13 @@ impl Collection {
             return;
         }
 
-        let document = materialize_doc(&document_bytes, page_cache);
+        let document = materialize_doc(&document_bytes, &self.page_cache);
 
         // Free overflow pages if present
         if (document_bytes[0] & FLAG_OVERFLOW) != 0 {
             let mut current_pnum = PageNum::from_bytes(document_bytes.u64_field(9));
             while let Some(pnum) = current_pnum {
-                let page = page_cache.lock_page(pnum);
+                let page = self.page_cache.lock_page(pnum);
                 let next_page = PageNum::from_bytes(page.u64_field(0));
                 drop(page);
                 page_allocator.free(pnum);
@@ -269,13 +270,13 @@ impl Collection {
             }
         }
 
-        self.document_tree.delete(docid_key, page_cache, page_allocator);
+        self.document_tree.delete(docid_key, page_allocator);
 
         // Remove from indices
         for index in &mut self.indices {
             if let Ok(val) = lookup_field(&index.field, &document) {
                 if let Ok(encoded) = encode_key(&val, docid) {
-                    index.btree.delete(&encoded, page_cache, page_allocator);
+                    index.btree.delete(&encoded, page_allocator);
                 }
             }
         }
@@ -408,7 +409,7 @@ pub struct SequentialScan {
 impl SequentialScan {
     pub fn new(collection: &Collection, page_cache: &PageCache) -> Self {
         Self {
-            iterator: collection.document_tree.iterate(false, page_cache),
+            iterator: collection.document_tree.iterate(false),
             page_cache: page_cache.clone()
         }
     }
@@ -445,9 +446,9 @@ impl IndexScan {
 
         let iterator = if let Some(start_range) = start_range {
             let start_key = encode_key(&start_range, DocId(if reverse {u64::MAX} else {0}))?;
-            collection.indices[field_index].btree.find(&start_key, reverse, page_cache)
+            collection.indices[field_index].btree.find(&start_key, reverse)
         } else {
-            collection.indices[field_index].btree.iterate(false, page_cache)
+            collection.indices[field_index].btree.iterate(false)
         };
 
         let end_key = if let Some(end_range) = end_range {
@@ -492,7 +493,7 @@ impl Iterator for IndexScan {
         };
 
         let docid = DocId(u64::from_be_bytes(docid_bytes.try_into().expect("Invalid docid field")));
-        let document = self.collection.borrow().get(docid, &self.page_cache);
+        let document = self.collection.borrow().get(docid);
         assert!(document.is_some(), "internal error: index out of sync, document doesn't exist");
 
         Some((docid, document.unwrap()))
@@ -633,12 +634,12 @@ mod tests {
     }
 
     fn populate_test_collection() -> (PageCache, PageAllocator, Collection, Vec<(DocId, Value)>) {
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let (page_cache, mut allocator, mut collection) = create_collection();
 
         let _transaction = page_cache.begin_transaction();
-        collection.create_index(&FieldPath::new("name").unwrap(), &mut page_cache, &mut allocator);
-        collection.create_index(&FieldPath::new("age").unwrap(), &mut page_cache, &mut allocator);
-        collection.create_index(&FieldPath::new("avg").unwrap(), &mut page_cache, &mut allocator);
+        collection.create_index(&FieldPath::new("name").unwrap(), &mut allocator);
+        collection.create_index(&FieldPath::new("age").unwrap(), &mut allocator);
+        collection.create_index(&FieldPath::new("avg").unwrap(), &mut allocator);
 
         let entries: [&str; _] = [
             r#"{"name": "James Smith", "age": 9, "avg": 0.160}"#,
@@ -653,7 +654,7 @@ mod tests {
         let mut documents: Vec<(DocId, Value)> = Vec::new();
         for entry in entries {
             let doc: Value = serde_json::from_str(entry).unwrap();
-            documents.push((collection.insert(&doc, &mut page_cache, &mut allocator),
+            documents.push((collection.insert(&doc, &mut allocator),
                 doc.clone()));
         }
 
@@ -738,10 +739,10 @@ mod tests {
 
         let mut docids = {
             let _transaction = page_cache.begin_transaction();
-            collection.create_index(&FieldPath::new("index").unwrap(), &page_cache, &mut allocator);
+            collection.create_index(&FieldPath::new("index").unwrap(), &mut allocator);
             vec![
-                collection.insert(&create_document(1), &page_cache, &mut allocator),
-                collection.insert(&create_document(2), &page_cache, &mut allocator)
+                collection.insert(&create_document(1), &mut allocator),
+                collection.insert(&create_document(2), &mut allocator)
             ]
         };
 
@@ -750,8 +751,8 @@ mod tests {
 
         let mut collection = Collection::open(&metadata, &page_cache);
 
-        assert_eq!(collection.get(docids[0], &page_cache).unwrap(), create_document(1));
-        assert_eq!(collection.get(docids[1], &page_cache).unwrap(), create_document(2));
+        assert_eq!(collection.get(docids[0]).unwrap(), create_document(1));
+        assert_eq!(collection.get(docids[1]).unwrap(), create_document(2));
 
         // Ensure index is correct
         assert_eq!(collection.indices.len(), 1);
@@ -760,13 +761,13 @@ mod tests {
         // Insert another record to ensure the docid is unique
         {
             let _transaction = page_cache.begin_transaction();
-            let new_docid = collection.insert(&create_document(3), &page_cache, &mut allocator);
+            let new_docid = collection.insert(&create_document(3), &mut allocator);
             assert!(!docids.contains(&new_docid));
             docids.push(new_docid);
         }
 
         // Validate everything is intact
-        let index_iter = collection.indices[0].btree.iterate(false, &page_cache);
+        let index_iter = collection.indices[0].btree.iterate(false);
         for (i, (key, value)) in index_iter.enumerate() {
             assert_eq!(key, encode_key(&json!(i + 1), docids[i]).unwrap());
             assert_eq!(value, docids[i].0.to_be_bytes());
@@ -781,7 +782,7 @@ mod tests {
         for i in 0..100 {
             let _transaction = page_cache.begin_transaction();
             docids.push(collection.insert(&create_document(i),
-                &page_cache, &mut allocator));
+                &mut allocator));
         }
 
         let mut i = 0;
@@ -796,47 +797,47 @@ mod tests {
     #[test]
     #[should_panic = "Attempt to insert non-object"]
     fn test_insert_non_object() {
-        let (page_cache, mut allocator, mut collection) = create_collection();
-        collection.insert(&json!([1,2,3,4]), &page_cache, &mut allocator);
+        let (_page_cache, mut allocator, mut collection) = create_collection();
+        collection.insert(&json!([1,2,3,4]), &mut allocator);
     }
 
     #[test]
     fn test_get_document() {
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let (page_cache, mut allocator, mut collection) = create_collection();
 
         let transaction = page_cache.begin_transaction();
         let doc1 = serde_json::from_str(r#"{"name": "James Smith", "age": 39}"#).unwrap();
-        let docid1 = collection.insert(&doc1, &mut page_cache, &mut allocator);
+        let docid1 = collection.insert(&doc1, &mut allocator);
         let doc2 = serde_json::from_str(r#"{"name": "Edward Jones", "age": 32}"#).unwrap();
-        let docid2 = collection.insert(&doc2, &mut page_cache, &mut allocator);
+        let docid2 = collection.insert(&doc2, &mut allocator);
         drop(transaction);
 
-        assert_eq!(collection.get(docid1, &page_cache).unwrap(), doc1);
-        assert_eq!(collection.get(docid2, &page_cache).unwrap(), doc2);
+        assert_eq!(collection.get(docid1).unwrap(), doc1);
+        assert_eq!(collection.get(docid2).unwrap(), doc2);
     }
 
     // Nothing is returned by cursor
     #[test]
     fn test_get_document_not_present1() {
-        let (page_cache, _allocator, collection) = create_collection();
-        assert!(collection.get(DocId(999), &page_cache).is_none());
+        let (_page_cache, _allocator, collection) = create_collection();
+        assert!(collection.get(DocId(999)).is_none());
     }
 
     // Cursor returns a value but docid doesn't match (usually because it's been
     // deleted).
     #[test]
     fn test_get_document_not_present2() {
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let (page_cache, mut allocator, mut collection) = create_collection();
 
         let transaction = page_cache.begin_transaction();
         let doc1 = serde_json::from_str(r#"{"name": "James Smith", "age": 39}"#).unwrap();
-        let docid1 = collection.insert(&doc1, &mut page_cache, &mut allocator);
+        let docid1 = collection.insert(&doc1, &mut allocator);
         let doc2 = serde_json::from_str(r#"{"name": "Edward Jones", "age": 32}"#).unwrap();
-        collection.insert(&doc2, &mut page_cache, &mut allocator);
-        collection.delete(docid1, &page_cache, &mut allocator);
+        collection.insert(&doc2, &mut allocator);
+        collection.delete(docid1, &mut allocator);
         drop(transaction);
 
-        assert!(collection.get(docid1, &page_cache).is_none());
+        assert!(collection.get(docid1).is_none());
     }
 
     #[test]
@@ -939,17 +940,17 @@ mod tests {
     fn test_index_missing_key() {
         // If we set up an index and that field is not present in a document,
         // we'll silently skip adding it to the index.
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let (page_cache, mut allocator, mut collection) = create_collection();
         let _transaction = page_cache.begin_transaction();
 
-        collection.create_index(&FieldPath::new("age").unwrap(), &mut page_cache, &mut allocator);
+        collection.create_index(&FieldPath::new("age").unwrap(), &mut allocator);
 
         let doc1 = serde_json::from_str(r#"{"name": "James Smith", "age": 39}"#).unwrap();
-        let docid1 = collection.insert(&doc1, &mut page_cache, &mut allocator);
+        let docid1 = collection.insert(&doc1, &mut allocator);
         let doc2 = serde_json::from_str(r#"{"name": "Edward Jones"}"#).unwrap();
-        collection.insert(&doc2, &mut page_cache, &mut allocator);
+        collection.insert(&doc2, &mut allocator);
 
-        let mut iter = collection.indices[0].btree.iterate(false, &mut page_cache);
+        let mut iter = collection.indices[0].btree.iterate(false);
         let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
         assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).unwrap()), docid1).unwrap());
         assert_eq!(u64::from_be_bytes(val1.try_into().unwrap()), docid1.0);
@@ -958,16 +959,16 @@ mod tests {
 
     #[test]
     fn test_index_ignore_array_key() {
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let (page_cache, mut allocator, mut collection) = create_collection();
         let _transaction = page_cache.begin_transaction();
-        collection.create_index(&FieldPath::new("age").unwrap(), &mut page_cache, &mut allocator);
+        collection.create_index(&FieldPath::new("age").unwrap(), &mut allocator);
 
         let doc1 = serde_json::from_str(r#"{"name": "James Smith", "age": 39}"#).unwrap();
-        let docid1 = collection.insert(&doc1, &mut page_cache, &mut allocator);
+        let docid1 = collection.insert(&doc1, &mut allocator);
         let doc2 = serde_json::from_str(r#"{"name": {"foo": 1}}"#).unwrap();
-        collection.insert(&doc2, &mut page_cache, &mut allocator);
+        collection.insert(&doc2, &mut allocator);
 
-        let mut iter = collection.indices[0].btree.iterate(false, &mut page_cache);
+        let mut iter = collection.indices[0].btree.iterate(false);
         let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
         assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).unwrap()), docid1).unwrap());
         assert_eq!(u64::from_be_bytes(val1.try_into().unwrap()), docid1.0);
@@ -976,17 +977,17 @@ mod tests {
 
     #[test]
     fn test_index_ignore_object_key() {
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let (page_cache, mut allocator, mut collection) = create_collection();
         let _transaction = page_cache.begin_transaction();
 
-        collection.create_index(&FieldPath::new("age").unwrap(), &mut page_cache, &mut allocator);
+        collection.create_index(&FieldPath::new("age").unwrap(), &mut allocator);
 
         let doc1 = serde_json::from_str(r#"{"name": "James Smith", "age": 39}"#).unwrap();
-        let docid1 = collection.insert(&doc1, &mut page_cache, &mut allocator);
+        let docid1 = collection.insert(&doc1, &mut allocator);
         let doc2 = serde_json::from_str(r#"{"name": [1,2,3]}"#).unwrap();
-        collection.insert(&doc2, &mut page_cache, &mut allocator);
+        collection.insert(&doc2, &mut allocator);
 
-        let mut iter = collection.indices[0].btree.iterate(false, &mut page_cache);
+        let mut iter = collection.indices[0].btree.iterate(false);
         let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
         assert_eq!(key1, encode_key(&Value::Number(Number::from_i128(39).unwrap()), docid1).unwrap());
         assert_eq!(u64::from_be_bytes(val1.try_into().unwrap()), docid1.0);
@@ -996,7 +997,7 @@ mod tests {
     // Add an index after populating the collection, ensure it reindexes
     #[test]
     fn test_create_index_after() {
-        let (mut page_cache, mut allocator, collection) = create_collection();
+        let (page_cache, mut allocator, collection) = create_collection();
         let collection_ref: Rc<RefCell<Collection>> = Rc::new(RefCell::new(collection));
 
         let _transaction = page_cache.begin_transaction();
@@ -1008,17 +1009,17 @@ mod tests {
         let mut orig_docs: Vec<(DocId, Value)> = Vec::new();
         for key in shuffled_keys {
             let doc: Value = json!({"key": key});
-            orig_docs.push((collection_ref.borrow_mut().insert(&doc, &mut page_cache, &mut allocator),
+            orig_docs.push((collection_ref.borrow_mut().insert(&doc, &mut allocator),
                 doc.clone()));
         }
 
         // Insert a record with an unindexable key. Ensure indexing code properly ignores it.
-        collection_ref.borrow_mut().insert(&json!({"key": [1,2,3,4,5]}), &mut page_cache, &mut allocator);
+        collection_ref.borrow_mut().insert(&json!({"key": [1,2,3,4,5]}), &mut allocator);
 
         // Create record where the key doesn't exist
-        collection_ref.borrow_mut().insert(&json!({"foo": 0}), &mut page_cache, &mut allocator);
+        collection_ref.borrow_mut().insert(&json!({"foo": 0}), &mut allocator);
 
-        collection_ref.borrow_mut().create_index(&FieldPath::new("key").unwrap(), &mut page_cache, &mut allocator);
+        collection_ref.borrow_mut().create_index(&FieldPath::new("key").unwrap(), &mut allocator);
         orig_docs.sort_by_key(|(_docid, doc)| doc["key"].as_u64().unwrap());
 
         let fetched_docs: Vec<_> = IndexScan::new(collection_ref, 0, None, None, false,
@@ -1112,7 +1113,7 @@ mod tests {
         let new_name = Value::String(format!("Dr. {}", documents[1].1["name"].as_str().unwrap()));
         new_doc["name"] = new_name;
         collection_ref.borrow_mut().update(documents[1].0, &new_doc,
-            &page_cache, &mut page_allocator);
+            &mut page_allocator);
         let mut new_documents: Vec<_> = documents.iter().map(|(docid, doc)| {
             if *docid == documents[1].0 {
                 (*docid, new_doc.clone())
@@ -1132,26 +1133,26 @@ mod tests {
 
     #[test]
     fn test_delete() {
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let (page_cache, mut allocator, mut collection) = create_collection();
         let _transaction = page_cache.begin_transaction();
 
-        collection.create_index(&FieldPath::new("foo").unwrap(), &mut page_cache, &mut allocator);
-        collection.create_index(&FieldPath::new("bar").unwrap(), &mut page_cache, &mut allocator);
+        collection.create_index(&FieldPath::new("foo").unwrap(), &mut allocator);
+        collection.create_index(&FieldPath::new("bar").unwrap(), &mut allocator);
 
         let doc1 = serde_json::from_str(r#"{"foo": "AAA", "bar": 1.2, "baz": true}"#).unwrap();
-        let docid1 = collection.insert(&doc1, &mut page_cache, &mut allocator);
+        let docid1 = collection.insert(&doc1, &mut allocator);
         let doc2 = serde_json::from_str(r#"{"foo": "BBBB", "bar": 2.3, "baz": false}"#).unwrap();
-        let docid2 = collection.insert(&doc2, &mut page_cache, &mut allocator);
+        let docid2 = collection.insert(&doc2, &mut allocator);
         let doc3 = serde_json::from_str(r#"{"foo": "CCCCC", "bar": 3.4, "baz": true}"#).unwrap();
-        let docid3 = collection.insert(&doc3, &mut page_cache, &mut allocator);
+        let docid3 = collection.insert(&doc3, &mut allocator);
         let doc4 = serde_json::from_str(r#"{"foo": "DDDDDD", "bar": 4.5, "baz": false}"#).unwrap();
-        let docid4 = collection.insert(&doc4, &mut page_cache, &mut allocator);
+        let docid4 = collection.insert(&doc4, &mut allocator);
 
-        collection.delete(docid2, &mut page_cache, &mut allocator);
+        collection.delete(docid2, &mut allocator);
 
         // Ensure this is removed from all indices
         {
-            let mut iter = collection.indices[0].btree.iterate(false, &mut page_cache); // foo
+            let mut iter = collection.indices[0].btree.iterate(false); // foo
             let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
             assert_eq!(key1, encode_key(&Value::String("AAA".to_string()), docid1).unwrap());
             assert_eq!(u64::from_be_bytes(val1.try_into().unwrap()), docid1.0);
@@ -1169,7 +1170,7 @@ mod tests {
 
         // Second index
         {
-            let mut iter = collection.indices[1].btree.iterate(false, &mut page_cache); // bar
+            let mut iter = collection.indices[1].btree.iterate(false); // bar
             let Some((key1, val1)) = iter.next() else { panic!("iterator did not return value") };
             assert_eq!(key1, encode_key(&Value::Number(Number::from_f64(1.2).unwrap()), docid1).unwrap());
             assert_eq!(u64::from_be_bytes(val1.try_into().unwrap()), docid1.0);
@@ -1187,7 +1188,7 @@ mod tests {
 
         // Scan main document btree
         {
-            let mut iter = collection.document_tree.iterate(false, &mut page_cache); // bar
+            let mut iter = collection.document_tree.iterate(false); // bar
             let Some((key1, _)) = iter.next() else { panic!("iterator did not return value") };
             assert_eq!(key1, docid1.0.to_be_bytes());
 
@@ -1204,28 +1205,28 @@ mod tests {
     // The field never existed
     #[test]
     fn test_delete_nonexistent1() {
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let (page_cache, mut allocator, mut collection) = create_collection();
         let _transaction = page_cache.begin_transaction();
-        collection.delete(DocId(999), &mut page_cache, &mut allocator);
-        let mut cursor = collection.document_tree.iterate(false, &mut page_cache);
+        collection.delete(DocId(999), &mut allocator);
+        let mut cursor = collection.document_tree.iterate(false);
         assert_eq!(cursor.next(), None);
     }
 
     // Delete the same record twice. Delete takes a different code path in this case.
     #[test]
     fn test_delete_nonexistent2() {
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let (page_cache, mut allocator, mut collection) = create_collection();
         let _transaction = page_cache.begin_transaction();
         let doc1 = serde_json::from_str(r#"{"foo": "AAA", "bar": 1.2}"#).unwrap();
-        let docid1 = collection.insert(&doc1, &mut page_cache, &mut allocator);
+        let docid1 = collection.insert(&doc1, &mut allocator);
         let doc2 = serde_json::from_str(r#"{"foo": "BBBB", "bar": 2.3}"#).unwrap();
-        let docid2 = collection.insert(&doc2, &mut page_cache, &mut allocator);
+        let docid2 = collection.insert(&doc2, &mut allocator);
 
-        collection.delete(docid1, &mut page_cache, &mut allocator);
-        collection.delete(docid1, &mut page_cache, &mut allocator);
+        collection.delete(docid1, &mut allocator);
+        collection.delete(docid1, &mut allocator);
 
         // Ensure second record is still present
-        let mut cursor = collection.document_tree.iterate(false, &mut page_cache);
+        let mut cursor = collection.document_tree.iterate(false);
         let Some((key2, _)) = cursor.next() else { panic!("iterator did not return value") };
         assert_eq!(key2, docid2.0.to_be_bytes());
         assert_eq!(cursor.next(), None);
@@ -1234,19 +1235,19 @@ mod tests {
     // We have an index, but this specific document does not have the corresponding field.
     #[test]
     fn test_delete_missing_index_field() {
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let (page_cache, mut allocator, mut collection) = create_collection();
         let _transaction = page_cache.begin_transaction();
-        collection.create_index(&FieldPath::new("age").unwrap(), &mut page_cache, &mut allocator);
+        collection.create_index(&FieldPath::new("age").unwrap(), &mut allocator);
 
         let doc1 = serde_json::from_str(r#"{"name": "James Smith"}"#).unwrap();
-        let docid1 = collection.insert(&doc1, &mut page_cache, &mut allocator);
+        let docid1 = collection.insert(&doc1, &mut allocator);
         let doc2 = serde_json::from_str(r#"{"name": "Edward Jones"}"#).unwrap();
-        let docid2 = collection.insert(&doc2, &mut page_cache, &mut allocator);
+        let docid2 = collection.insert(&doc2, &mut allocator);
 
-        collection.delete(docid1, &mut page_cache, &mut allocator);
+        collection.delete(docid1, &mut allocator);
 
         // Ensure second record is still present
-        let mut cursor = collection.document_tree.iterate(false, &mut page_cache);
+        let mut cursor = collection.document_tree.iterate(false);
         let Some((key2, _)) = cursor.next() else { panic!("iterator did not return value") };
         assert_eq!(key2, docid2.0.to_be_bytes());
         assert_eq!(cursor.next(), None);
@@ -1254,13 +1255,13 @@ mod tests {
 
     #[test]
     fn test_overflow_pages() {
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let (page_cache, mut allocator, mut collection) = create_collection();
         let _transaction = page_cache.begin_transaction();
 
         // Create a large document (>128k)
         let large_value = "x".repeat(0x20000);
         let doc = json!({"foo": large_value});
-        let docid = collection.insert(&doc, &mut page_cache, &mut allocator);
+        let docid = collection.insert(&doc, &mut allocator);
 
         // Ensure we can read it back correctly
         let mut iter = SequentialScan::new(&collection, &page_cache);
@@ -1270,7 +1271,7 @@ mod tests {
         assert_eq!(got_doc["foo"].as_str().unwrap(), large_value);
 
         // Delete the document
-        collection.delete(docid, &mut page_cache, &mut allocator);
+        collection.delete(docid, &mut allocator);
 
         let mut iter = SequentialScan::new(&collection, &page_cache);
         assert!(iter.next().is_none());
@@ -1282,7 +1283,7 @@ mod tests {
     #[test]
     #[should_panic = "Error: record truncated"]
     fn test_overflow_truncated() {
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let (page_cache, mut allocator, mut collection) = create_collection();
         let _transaction = page_cache.begin_transaction();
 
         // XXX hack: allocate and free the page, which will tell us where the
@@ -1293,7 +1294,7 @@ mod tests {
         // Create a large document
         let large_value = "x".repeat(0x4000);
         let doc = json!({"foo": large_value});
-        let _docid = collection.insert(&doc, &mut page_cache, &mut allocator);
+        let _docid = collection.insert(&doc, &mut allocator);
 
         // XXX hack hard coded page address
         {
@@ -1308,16 +1309,16 @@ mod tests {
     // large key it ignores it rather than doing something bad.
     #[test]
     fn test_index_large_field() {
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let (page_cache, mut allocator, mut collection) = create_collection();
 
         let transaction = page_cache.begin_transaction();
-        collection.create_index(&FieldPath::new("image_data").unwrap(), &mut page_cache, &mut allocator);
+        collection.create_index(&FieldPath::new("image_data").unwrap(), &mut allocator);
 
         let doc1 = json!({"image_data": "abcd"});
-        let docid1 = collection.insert(&doc1, &mut page_cache, &mut allocator);
+        let docid1 = collection.insert(&doc1, &mut allocator);
 
         let doc2 = json!({"image_data": "x".repeat(0x4000)});
-        let _docid2 = collection.insert(&doc2, &mut page_cache, &mut allocator);
+        let _docid2 = collection.insert(&doc2, &mut allocator);
 
         drop(transaction);
 
@@ -1330,12 +1331,12 @@ mod tests {
 
     #[test]
     fn test_find_index() {
-        let (mut page_cache, mut allocator, mut collection) = create_collection();
+        let (page_cache, mut allocator, mut collection) = create_collection();
 
         let _transaction = page_cache.begin_transaction();
-        collection.create_index(&FieldPath::new("foo").unwrap(), &mut page_cache, &mut allocator);
-        collection.create_index(&FieldPath::new("bar.baz").unwrap(), &mut page_cache, &mut allocator);
-        collection.create_index(&FieldPath::new("boo").unwrap(), &mut page_cache, &mut allocator);
+        collection.create_index(&FieldPath::new("foo").unwrap(), &mut allocator);
+        collection.create_index(&FieldPath::new("bar.baz").unwrap(), &mut allocator);
+        collection.create_index(&FieldPath::new("boo").unwrap(), &mut allocator);
 
         assert_eq!(collection.find_index("foo"), Some(0));
         assert_eq!(collection.find_index("bar.baz"), Some(1));
